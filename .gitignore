@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Node / TypeScript
+node_modules/
+*.js.map
+dist/
+*.d.ts
+!*.config.d.ts
+
+# CDK
+cdk.out/
+cdk.context.json
+cdk-outputs*.json
+
+# Logs & reports
+*.log
+deployment-report-*.json
+ash-output/
+ash-report/
+.ash/
+
+# Local config / secrets — never commit
+# Kept at the repository root so every subdirectory inherits it. A contributor
+# working in any stack directory is covered, not only the one that happened to
+# list these patterns.
+credentials
+credentials.json
+aws-credentials.json
+aws-creds.json
+creds.json
+.aws/
+.netrc
+.npmrc
+.pypirc
+.envrc
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+*.p12
+*.pfx
+*.p8
+*.jks
+*.keystore
+secrets.json
+secrets.y*ml
+auth.json
+session.json
+sso-cache.json
+kubeconfig
+service-account.json
+*-creds.json
+*.tfstate*
+.env
+.env.*
+!.env.example
+config/*.local.json
+*.pem
+*.key
+.secrets.baseline
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+.kiro/
+
+# Backups
+*.bak
+*.orig

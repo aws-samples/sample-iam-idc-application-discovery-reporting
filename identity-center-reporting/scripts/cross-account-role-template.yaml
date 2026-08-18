@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cross-account IAM role for IAM Identity Center Discovery
+
+Parameters:
+  SolutionDeployedAccountId:
+    Type: String
+    Description: AWS Account ID where the IAM IdC solution is deployed.
+    AllowedPattern: '[0-9]{12}'
+    ConstraintDescription: Must be a valid 12-digit AWS Account ID
+
+Resources:
+  CrossAccountDiscoveryRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              IAM Identity Center (sso/sso-admin), Identity Store, and CloudTrail
+              LookupEvents do not support resource-level permissions, so a
+              wildcard resource is required. Access is read-only and gated by an
+              ExternalId condition on the trust policy.
+          - id: W28
+            reason: >-
+              An explicit RoleName is required because the solution's Lambda
+              execution role assumes this role by a fixed, well-known ARN
+              (sts:AssumeRole on .../iam-identity-center-cross-account-discovery-role).
+    Properties:
+      RoleName: iam-identity-center-cross-account-discovery-role
+      Description: Cross-account role for IAM Identity Center discovery
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${SolutionDeployedAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: iam-identity-center-discovery
+      Policies:
+        - PolicyName: IAMIdentityCenterDiscoveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # There is no "sso-admin:" IAM prefix. "sso-admin" is the SDK/CLI
+              # client name; every IAM Identity Center action uses the "sso:"
+              # prefix. The Service Authorization Reference declares
+              # "service prefix: sso" and lists sso-admin only in its
+              # "SDK client" column:
+              # https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam-identity-center.html
+              - Sid: IAMIdentityCenterReadAccess
+                Effect: Allow
+                Action:
+                  - sso:ListInstances
+                  - sso:DescribeInstance
+                  - sso:ListApplications
+                  - sso:DescribeApplication
+                  - sso:DescribeApplicationProvider
+                  - sso:ListApplicationAssignments
+                  - sso:DescribeApplicationAssignment
+                Resource: '*'
+              - Sid: SSOPermissionSetReadAccess
+                Effect: Allow
+                Action:
+                  - sso:ListPermissionSets
+                  - sso:DescribePermissionSet
+                Resource: '*'
+              - Sid: IdentityStoreReadAccess
+                Effect: Allow
+                Action:
+                  - identitystore:DescribeUser
+                  - identitystore:DescribeGroup
+                  - identitystore:ListUsers
+                  - identitystore:ListGroups
+                  - identitystore:ListGroupMemberships
+                Resource: '*'
+              - Sid: CloudTrailReadAccess
+                Effect: Allow
+                Action:
+                  - cloudtrail:LookupEvents
+                Resource: '*'
+      Tags:
+        - Key: Purpose
+          Value: IAMIdentityCenterDiscovery
+        - Key: ManagedBy
+          Value: IAMIdentityCenterDiscoveryStack
+
+Outputs:
+  CrossAccountRoleArn:
+    Description: ARN of the cross-account discovery role
+    Value: !GetAtt CrossAccountDiscoveryRole.Arn
+    Export:
+      Name: IAMIdentityCenterDiscovery-CrossAccountRoleArn
+  RoleName:
+    Description: Name of the cross-account discovery role
+    Value: !Ref CrossAccountDiscoveryRole

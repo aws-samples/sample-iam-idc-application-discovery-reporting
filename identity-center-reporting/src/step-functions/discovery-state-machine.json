@@ -1,0 +1,454 @@
+{
+  "Comment": "IAM Identity Center Discovery State Machine - Simplified with unified instance scanner",
+  "StartAt": "CheckDiscoveryType",
+  "States": {
+    "CheckDiscoveryType": {
+      "Type": "Choice",
+      "Comment": "Determine if this should be full or incremental discovery",
+      "Choices": [
+        {
+          "Variable": "$.force_full_discovery",
+          "BooleanEquals": true,
+          "Next": "InitializeDiscovery"
+        },
+        {
+          "Variable": "$.incremental_discovery_enabled",
+          "BooleanEquals": true,
+          "Next": "CheckIncrementalEligibility"
+        }
+      ],
+      "Default": "InitializeDiscovery"
+    },
+    "CheckIncrementalEligibility": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ChangeDetectionFunction}",
+        "Payload": {
+          "action": "check_eligibility",
+          "discovery_run_id.$": "States.UUID()",
+          "force_full_discovery.$": "$.force_full_discovery"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "EvaluateIncrementalDecision"
+    },
+    "EvaluateIncrementalDecision": {
+      "Type": "Choice",
+      "Comment": "Decide between full and incremental discovery",
+      "Choices": [
+        {
+          "Variable": "$.Payload.body.should_run_incremental",
+          "BooleanEquals": true,
+          "Next": "InitializeIncrementalDiscovery"
+        }
+      ],
+      "Default": "InitializeDiscovery"
+    },
+    "InitializeIncrementalDiscovery": {
+      "Type": "Pass",
+      "Comment": "Initialize incremental discovery with change detection",
+      "Parameters": {
+        "discovery_run_id.$": "$.Payload.body.discovery_run_id",
+        "discovery_type": "incremental",
+        "start_time.$": "$$.State.EnteredTime",
+        "incremental_plan.$": "$.Payload.body.incremental_plan"
+      },
+      "Next": "IncrementalInstanceScanner"
+    },
+    "IncrementalInstanceScanner": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${InstanceScannerFunction}",
+        "Payload": {
+          "discovery_type": "incremental",
+          "discovery_run_id.$": "$.discovery_run_id",
+          "incremental_plan.$": "$.incremental_plan"
+        }
+      },
+      "TimeoutSeconds": 600,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "ProcessIncrementalResults"
+    },
+    "ProcessIncrementalResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ChangeDetectionFunction}",
+        "Payload": {
+          "action": "detect_changes",
+          "discovery_run_id.$": "$.Payload.discovery_run_id",
+          "discovery_type": "incremental",
+          "discovery_results.$": "$"
+        }
+      },
+      "TimeoutSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "ResultPath": "$.change_detection_result",
+      "Next": "EnrichIncrementalWithLastAccessed"
+    },
+    "EnrichIncrementalWithLastAccessed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Enrich assignments with last-accessed data from CloudTrail after incremental discovery.",
+      "Parameters": {
+        "FunctionName": "${AccessTrackerFunction}",
+        "Payload": {
+          "action": "enrich_last_accessed",
+          "discovery_run_id.$": "$.Payload.discovery_run_id",
+          "lookback_days": 90,
+          "stale_threshold_days": "${StaleThresholdDays}"
+        }
+      },
+      "TimeoutSeconds": 600,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "IncrementalDiscoveryComplete",
+          "ResultPath": "$.access_tracking_error"
+        }
+      ],
+      "ResultPath": "$.access_tracking_result",
+      "Next": "IncrementalDiscoveryComplete"
+    },
+    "IncrementalDiscoveryComplete": {
+      "Type": "Pass",
+      "Comment": "Incremental discovery completed successfully",
+      "End": true
+    },
+    "InitializeDiscovery": {
+      "Type": "Pass",
+      "Comment": "Initialize full discovery run",
+      "Parameters": {
+        "discovery_run_id.$": "States.UUID()",
+        "start_time.$": "$$.State.EnteredTime",
+        "discovery_type": "full"
+      },
+      "Next": "UnifiedInstanceScanner"
+    },
+    "UnifiedInstanceScanner": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Unified scanner discovers ALL instances (org + account level)",
+      "Parameters": {
+        "FunctionName": "${InstanceScannerFunction}",
+        "Payload.$": "$"
+      },
+      "TimeoutSeconds": 900,
+      "HeartbeatSeconds": 120,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": ["Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 5,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "InstanceScannerError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CheckInstancesFound"
+    },
+    "InstanceScannerError": {
+      "Type": "Pass",
+      "Comment": "Handle instance scanner errors",
+      "Parameters": {
+        "success": false,
+        "error.$": "$.error",
+        "Payload": {
+          "instances": [],
+          "discovery_run_id.$": "$.discovery_run_id"
+        }
+      },
+      "Next": "NoInstancesFound"
+    },
+    "CheckInstancesFound": {
+      "Type": "Choice",
+      "Comment": "Check if any instances were discovered",
+      "Choices": [
+        {
+          "Variable": "$.Payload.instances",
+          "IsPresent": true,
+          "Next": "CheckInstancesNotEmpty"
+        }
+      ],
+      "Default": "NoInstancesFound"
+    },
+    "CheckInstancesNotEmpty": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Payload.instances[0]",
+          "IsPresent": true,
+          "Next": "ApplicationDiscoveryMap"
+        }
+      ],
+      "Default": "NoInstancesFound"
+    },
+    "NoInstancesFound": {
+      "Type": "Pass",
+      "Comment": "No instances found - complete discovery",
+      "Parameters": {
+        "discovery_run_id.$": "$.Payload.discovery_run_id",
+        "status": "completed",
+        "message": "No IAM Identity Center instances found"
+      },
+      "End": true
+    },
+    "ApplicationDiscoveryMap": {
+      "Type": "Map",
+      "Comment": "Fan-out application discovery for each instance",
+      "ItemsPath": "$.Payload.instances",
+      "MaxConcurrency": 10,
+      "ToleratedFailurePercentage": 50,
+      "Iterator": {
+        "StartAt": "ApplicationDiscovery",
+        "States": {
+          "ApplicationDiscovery": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${ApplicationDiscoveryFunction}",
+              "Payload.$": "$"
+            },
+            "TimeoutSeconds": 300,
+            "Retry": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "ApplicationDiscoveryError",
+                "ResultPath": "$.error"
+              }
+            ],
+            "End": true
+          },
+          "ApplicationDiscoveryError": {
+            "Type": "Pass",
+            "Comment": "Handle application discovery errors",
+            "Parameters": {
+              "success": false,
+              "error.$": "$.error",
+              "instance_arn.$": "$.instance_arn"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.application_results",
+      "Next": "ProcessApplications"
+    },
+    "ProcessApplications": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Flatten applications from map results using Lambda",
+      "Parameters": {
+        "FunctionName": "${ChangeDetectionFunction}",
+        "Payload": {
+          "action": "flatten_applications",
+          "discovery_run_id.$": "$.Payload.discovery_run_id",
+          "application_results.$": "$.application_results"
+        }
+      },
+      "ResultPath": "$.flattened",
+      "Next": "ExtractFlattenedApplications"
+    },
+    "ExtractFlattenedApplications": {
+      "Type": "Pass",
+      "Comment": "Extract flattened applications",
+      "Parameters": {
+        "discovery_run_id.$": "$.Payload.discovery_run_id",
+        "applications.$": "$.flattened.Payload.applications"
+      },
+      "Next": "CheckApplicationsFound"
+    },
+    "CheckApplicationsFound": {
+      "Type": "Choice",
+      "Comment": "Check if any applications were discovered",
+      "Choices": [
+        {
+          "Variable": "$.applications[0]",
+          "IsPresent": true,
+          "Next": "AssignmentDiscoveryMap"
+        }
+      ],
+      "Default": "NoApplicationsFound"
+    },
+    "NoApplicationsFound": {
+      "Type": "Pass",
+      "Comment": "No applications found",
+      "Parameters": {
+        "discovery_run_id.$": "$.discovery_run_id",
+        "status": "completed",
+        "message": "No applications found in discovered instances"
+      },
+      "End": true
+    },
+    "AssignmentDiscoveryMap": {
+      "Type": "Map",
+      "Comment": "Fan-out assignment discovery for each application",
+      "ItemsPath": "$.applications",
+      "MaxConcurrency": 20,
+      "ToleratedFailurePercentage": 30,
+      "Iterator": {
+        "StartAt": "AssignmentDiscovery",
+        "States": {
+          "AssignmentDiscovery": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${AssignmentDiscoveryFunction}",
+              "Payload.$": "$"
+            },
+            "TimeoutSeconds": 180,
+            "Retry": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "AssignmentDiscoveryError",
+                "ResultPath": "$.error"
+              }
+            ],
+            "End": true
+          },
+          "AssignmentDiscoveryError": {
+            "Type": "Pass",
+            "Comment": "Handle assignment discovery errors",
+            "Parameters": {
+              "success": false,
+              "error.$": "$.error",
+              "application_arn.$": "$.application_arn"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.assignment_results",
+      "Next": "DetectChanges"
+    },
+    "DetectChanges": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ChangeDetectionFunction}",
+        "Payload": {
+          "action": "detect_changes",
+          "discovery_run_id.$": "$.discovery_run_id",
+          "discovery_type": "full",
+          "discovery_results.$": "$"
+        }
+      },
+      "TimeoutSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "EnrichWithLastAccessed"
+        }
+      ],
+      "ResultPath": "$.change_detection_result",
+      "Next": "EnrichWithLastAccessed"
+    },
+    "EnrichWithLastAccessed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Enrich assignments with last-accessed data from CloudTrail. stale_threshold_days defaults to 30 if not provided in input.",
+      "Parameters": {
+        "FunctionName": "${AccessTrackerFunction}",
+        "Payload": {
+          "action": "enrich_last_accessed",
+          "discovery_run_id.$": "$.discovery_run_id",
+          "lookback_days": 90,
+          "stale_threshold_days": "${StaleThresholdDays}"
+        }
+      },
+      "TimeoutSeconds": 600,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "DiscoveryComplete",
+          "ResultPath": "$.access_tracking_error"
+        }
+      ],
+      "ResultPath": "$.access_tracking_result",
+      "Next": "DiscoveryComplete"
+    },
+    "DiscoveryComplete": {
+      "Type": "Pass",
+      "Comment": "Discovery workflow completed successfully",
+      "End": true
+    }
+  }
+}

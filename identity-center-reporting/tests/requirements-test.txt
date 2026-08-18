@@ -1,0 +1,24 @@
+# Testing dependencies for IAM Identity Center Discovery solution
+
+# Core testing framework
+pytest>=7.4.0,<10
+pytest-cov>=4.1.0,<8
+pytest-mock>=3.11.1,<4
+
+# Mocking and fixtures
+moto>=4.2.0,<6
+responses>=0.23.0,<1
+
+# Code quality
+pylint>=2.17.0,<5
+flake8>=6.0.0,<8
+black>=23.7.0,<27
+
+# AWS SDK
+boto3>=1.28.0,<2
+botocore>=1.31.0,<2
+
+# Additional utilities
+freezegun>=1.2.2  # For time-based testing
+faker>=19.0.0     # For generating test data
+hypothesis>=6.92.0  # For property-based testing

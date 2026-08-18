@@ -1,0 +1,1 @@
+# Infrastructure code for IAM Identity Center Discovery Solution

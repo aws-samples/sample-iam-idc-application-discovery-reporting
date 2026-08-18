@@ -1,0 +1,58 @@
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+.kiro
+.hypothesis
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+cdk.json.example
+# package-lock.json is committed for reproducible `npm ci` installs (do not ignore)
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Security scan reports
+ash-report/
