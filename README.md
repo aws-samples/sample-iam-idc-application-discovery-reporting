@@ -251,7 +251,12 @@ The reporting solution is deployed with the AWS CDK. From the repository root:
 git clone https://github.com/aws-samples/sample-iam-idc-application-discovery-reporting.git
 cd sample-iam-idc-application-discovery-reporting/identity-center-reporting
 
-# 2. Install dependencies
+# 2. Create a virtualenv on Python 3.12 and install dependencies.
+#    Use python3.12 explicitly, not bare `python3`: aws-cdk-lib requires >= 3.10,
+#    and on macOS `python3` is still the system 3.9, where this install fails with
+#    "No matching distribution found for aws-cdk-lib" rather than a version error.
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Bootstrap the CDK (if you haven't already in this account/Region)

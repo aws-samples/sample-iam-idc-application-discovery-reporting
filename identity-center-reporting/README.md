@@ -298,12 +298,21 @@ See the [repository README](../README.md) for prerequisites, required IAM permis
 > brevity — add it to each one.
 
 ```bash
-# Validate first: synthesize the template and run the tests
+# Create a virtualenv on Python 3.12 first. Use python3.12 explicitly, not bare
+# `python3`: aws-cdk-lib requires >= 3.10, and on macOS `python3` is still the
+# system 3.9, where the install fails with "No matching distribution found for
+# aws-cdk-lib" rather than a clear version error. The pinned version is in
+# .python-version.
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Validate: synthesize the template and run the tests
 pip install -r tests/requirements-test.txt
 cdk synth --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
 python -m pytest tests
 
-# Deploy to development (env defaults to dev; open API by default)
+# Deploy to development (env defaults to dev; 0.0.0.0/0 chosen explicitly here)
 cdk deploy \
   --parameters AllowedIpRange=0.0.0.0/0 \
   --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
