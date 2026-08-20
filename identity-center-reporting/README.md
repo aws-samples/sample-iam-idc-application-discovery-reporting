@@ -1912,13 +1912,33 @@ A: Yes, the solution discovers instances across all regions in your organization
 A: The system falls back to using principal IDs. Check Identity Store permissions.
 
 **Q: How much does this cost to run?**  
-A: The cost drivers are Lambda invocations (one discovery run per day plus any manual
-runs), DynamoDB on-demand reads/writes and storage, S3 storage for CSV exports
-(expired after 30 days by the bucket lifecycle rule), CloudWatch Logs ingestion, and
-KMS requests. The totals depend on how many instances, applications, and assignments
-your organization has, and on your Region's pricing. Model your own figure with the
+A: Most of it is fixed, not usage-driven — which is the opposite of what a
+per-run-cost intuition suggests, so budget for it before you deploy.
+
+The stack puts the discovery Lambdas in a VPC with private subnets, and that
+networking bills by the hour whether or not a discovery run happens:
+
+| Always-on resource | Quantity | Rate (us-east-1) | Approx. per 730-hour month |
+|---|---|---|---|
+| NAT gateway | 1 | $0.045/hour + $0.045/GB processed | ~$33 |
+| Interface VPC endpoints (STS, SNS, CloudWatch, CloudWatch Logs, Step Functions) | 5 endpoints x 2 subnets = 10 billable ENIs | $0.010/hour per endpoint per AZ | ~$73 |
+| Gateway VPC endpoints (S3, DynamoDB) | 2 | no hourly charge | $0 |
+
+That is roughly **$105/month in us-east-1 with the stack idle**. Interface endpoints
+are billed per Availability Zone, so the count that matters is endpoints x subnets,
+not endpoints.
+
+The usage-driven part is small by comparison: Lambda invocations (one scheduled run
+per day plus any manual runs), DynamoDB on-demand reads/writes and storage, S3
+storage for CSV exports (expired after 30 days by the bucket lifecycle rule),
+CloudWatch Logs ingestion, and KMS requests. These scale with how many instances,
+applications, and assignments your organization has.
+
+Rates were read from the AWS Price List API for us-east-1 and will differ by Region
+and over time. Model your own figure with the
 [AWS Pricing Calculator](https://calculator.aws/) rather than relying on an estimate
-from a different environment.
+from a different environment, and see [Clean up](../README.md#clean-up) — the fixed
+charges continue until the stack is deleted.
 
 ---
 

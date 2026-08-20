@@ -411,7 +411,11 @@ for the full set of endpoints and CSV formats.
 
 ## Clean up
 
-To avoid ongoing charges, delete the resources when you no longer need them:
+The reporting stack's VPC networking — one NAT gateway and five interface endpoints
+across two subnets — bills by the hour whether or not a discovery run happens, on the
+order of $105/month in us-east-1 with the stack idle (see
+[How much does this cost to run?](./identity-center-reporting/README.md#testing--validation)).
+To avoid those ongoing charges, delete the resources when you no longer need them:
 
 ```bash
 # Reactive monitoring (if deployed)
