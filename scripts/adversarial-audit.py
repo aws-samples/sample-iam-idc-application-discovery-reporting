@@ -299,8 +299,8 @@ NON_IDENTITY_IDS = frozenset({
     'topic_id', 'rule_id', 'log_id', 'directory_id', 'provider_id',
     'current_account_id', 'delegated_admin_account_id', 'management_account_id',
     'delegated_admin_identity_store_id',
-    # SNS message IDs, from response['MessageId'].
-    'message_id',
+    # SNS message IDs, from response['MessageId'], and the Lambda invocation ID.
+    'message_id', 'aws_request_id',
     # A bare 'Id' key in an AWS response is a resource ID -- an organization, an
     # account, an application. Identity Store principals are never spelled that
     # way in this codebase: they are PrincipalId, UserId, GroupId, or
@@ -344,8 +344,20 @@ def _logged_identifiers(node):
                 # AWS-API spelling classifies the same as the Python one.
                 found.add(_snake(sub.value))
 
+    def emits_a_value(arg):
+        """
+        False when the argument yields a boolean rather than the value itself.
+
+        `put_annotation('has_principal_name', principal_name is not None)` writes
+        True or False -- the name never reaches the trace -- but the identifier is
+        still there in the AST, so collecting it flagged a call that was already
+        doing the right thing. A predicate about a value is not the value.
+        """
+        return not isinstance(arg, (ast.Compare, ast.BoolOp))
+
     for arg in node.args[1:]:          # skip the format string itself
-        collect(arg)
+        if emits_a_value(arg):
+            collect(arg)
     for kw in node.keywords:
         if kw.value is not None:
             collect(kw.value)
@@ -394,6 +406,27 @@ def _interpolated_identifiers(expr):
     return found
 
 
+def _only_as_predicate(seg, token):
+    """
+    True when every mention of `token` in this segment is a boolean test on it.
+
+    Recognises `X is None`, `X is not None`, and `bool(X)`. Anything else -- an
+    interpolation, a bare argument, a dict value -- means the value can reach the
+    output and the finding stands.
+    """
+    mentions = list(re.finditer(rf'\b{re.escape(token)}\b', seg))
+    if not mentions:
+        return False
+    for m in mentions:
+        after = seg[m.end():m.end() + 24]
+        before = seg[max(0, m.start() - 6):m.start()]
+        is_test = re.match(r'\s+is\s+(not\s+)?None\b', after)
+        is_bool = before.rstrip().endswith('bool(')
+        if not (is_test or is_bool):
+            return False
+    return True
+
+
 def _classify_pii(path, lineno, seg, identifiers, note=''):
     """
     Report the first way this segment leaks an identity field, if any.
@@ -405,9 +438,17 @@ def _classify_pii(path, lineno, seg, identifiers, note=''):
     where = f'{rel(path)}:{lineno}'
 
     for tok in PII_TOKENS:
-        if re.search(rf'[{{,(\s\'"]{re.escape(tok)}\b', seg):
-            finding('pii', where, f'logs {tok} without redaction{note}')
-            return True
+        if not re.search(rf'[{{,(\s\'"]{re.escape(tok)}\b', seg):
+            continue
+        # Every occurrence inside a boolean predicate means the value itself never
+        # leaves the process: `put_annotation('has_principal_name', principal_name
+        # is not None)` writes True or False. The token check reads the source
+        # segment rather than the AST, so it saw the identifier and flagged a call
+        # that was already correct.
+        if _only_as_predicate(seg, tok):
+            continue
+        finding('pii', where, f'logs {tok} without redaction{note}')
+        return True
 
     offenders = _identity_subscripts(seg)
     if offenders:
@@ -441,6 +482,14 @@ def _classify_pii(path, lineno, seg, identifiers, note=''):
 LOG_METHODS = ('info', 'warning', 'error', 'debug', 'exception')
 
 
+# X-Ray sinks. put_metadata / put_annotation write into the trace, which is a
+# durable store read separately from CloudWatch and not covered by the log-line
+# redaction the rest of this repo applies. Two places wrote identity data there
+# while every logger call beside them redacted it: tracing.py's error metadata and
+# matching.py's matching_details.
+XRAY_SINKS = ('put_metadata', 'put_annotation')
+
+
 def _emits_output(fn):
     """
     True for a call that writes somewhere a person or a log stream can read it.
@@ -453,7 +502,7 @@ def _emits_output(fn):
     something a logging site is that the value leaves the process, not which
     library carried it.
     """
-    if isinstance(fn, ast.Attribute) and fn.attr in LOG_METHODS:
+    if isinstance(fn, ast.Attribute) and fn.attr in LOG_METHODS + XRAY_SINKS:
         return True
     return isinstance(fn, ast.Name) and fn.id == 'print'
 

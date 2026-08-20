@@ -144,8 +144,13 @@ def test_metadata_added_for_matching_details():
         assert metadata_call[0][0] == 'matching_details'
         
         metadata_content = metadata_call[0][1]
-        assert 'principal_name' in metadata_content
-        assert metadata_content['principal_name'] == 'Engineering'
+        # The principal must NOT be in the trace. X-Ray is a durable store read
+        # separately from CloudWatch, and every log statement in matching.py
+        # redacts this value -- writing it into subsegment metadata put it back.
+        # The previous version of this test asserted the name was present, which
+        # is what held the leak in place.
+        assert 'principal_name' not in metadata_content
+        assert 'Engineering' not in str(metadata_content.get('result', ''))
         assert 'application_name' in metadata_content
         assert metadata_content['application_name'] == 'Engineering-Portal'
         assert 'result' in metadata_content

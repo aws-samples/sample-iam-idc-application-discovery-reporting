@@ -136,10 +136,39 @@ def run_in(needle_tokens: List[str], hay_tokens: List[str]) -> bool:
     return False
 
 
+def _friendly_group_name(group_name: str, group_name_regex: Optional[str]) -> str:
+    """
+    Extract the friendly part of a group name, mirroring the monitoring stack.
+
+    Must stay behaviourally identical to validate_assignment() in
+    identity-center-remediation/lambda/validation.py, including its fallbacks:
+    group(1) is None when the first group is optional and did not participate, and
+    '' when it matched zero characters. Neither is usable as a needle, so both fall
+    back to the full group name -- as does an invalid pattern.
+
+    The reporting stack accepted GroupNameRegex, shipped it to three Lambdas as
+    GROUP_NAME_REGEX, and never read it. With a regex configured, monitoring judged an
+    assignment on the extracted name while reporting judged the raw one, so the two
+    stacks disagreed about the same assignment -- and the documented workflow is to
+    establish a baseline with reporting before turning monitoring on.
+    """
+    if not group_name_regex:
+        return group_name
+    try:
+        match = re.search(group_name_regex, group_name)
+        extracted = match.group(1) if (match and match.groups()) else None
+        if extracted and extracted.strip():
+            return extracted
+        return group_name
+    except Exception:
+        return group_name
+
+
 def evaluate_group_application_match(
     principal_type: str,
     principal_name: Optional[str],
-    application_name: Optional[str]
+    application_name: Optional[str],
+    group_name_regex: Optional[str] = None
 ) -> str:
     """
     Evaluate if a group name and an application name match by symmetric
@@ -216,8 +245,9 @@ def evaluate_group_application_match(
             _emit_matching_metrics(result, error_occurred)
             return result
         
-        # Perform symmetric whole-word (token) matching
-        group_tokens = _tokenize(principal_name)
+        # Perform symmetric whole-word (token) matching on the friendly name
+        friendly_group_name = _friendly_group_name(principal_name, group_name_regex)
+        group_tokens = _tokenize(friendly_group_name)
         app_tokens = _tokenize(application_name)
         if run_in(app_tokens, group_tokens) or run_in(group_tokens, app_tokens):
             result = 'Yes'
@@ -227,8 +257,12 @@ def evaluate_group_application_match(
         # Add matching result annotation
         if subsegment:
             subsegment.put_annotation('matching_result', result)
+            # No principal_name here. A trace is a durable store read separately
+            # from the logs, and every log statement in this module already redacts
+            # this value -- writing it verbatim into subsegment metadata put it back.
+            # The application name and the verdict are what the trace is read for,
+            # and neither identifies a person.
             subsegment.put_metadata('matching_details', {
-                'principal_name': principal_name,
                 'application_name': application_name,
                 'result': result
             })

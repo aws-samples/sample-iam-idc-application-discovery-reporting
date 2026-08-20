@@ -404,7 +404,8 @@ def process_assignment(
         matching_result = evaluate_group_application_match(
             principal_type=principal_type,
             principal_name=principal_name,
-            application_name=application_name
+            application_name=application_name,
+            group_name_regex=os.environ.get('GROUP_NAME_REGEX') or None
         )
         
         # Prepare matched field with matching result
