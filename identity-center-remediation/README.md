@@ -4,7 +4,7 @@ Event-driven AWS solution that monitors AWS Identity Center application assignme
 
 ## Overview
 
-This solution automatically monitors Identity Center application assignments and enforces naming conventions by validating that group names are substrings of application names (case-insensitive). When non-compliant assignments are detected, the system can either:
+This solution automatically monitors Identity Center application assignments and enforces naming conventions by validating that the group name appears as a whole word in the application name (case-insensitive, splitting on `-`, `_`, and whitespace). Note this is not a substring match -- `read` does not satisfy `sagemaker_readonly`. When non-compliant assignments are detected, the system can either:
 
 - **Notification Mode** (default): Send alerts via SNS without modifying assignments
 - **Auto-Deletion Mode**: Automatically delete non-compliant assignments and send notifications
@@ -13,8 +13,11 @@ This solution automatically monitors Identity Center application assignments and
 
 The solution supports two matching modes:
 
-1. **Default Substring Matching** (no regex): The full group name must appear in the application name
+1. **Default Whole-Word Matching** (no regex): The group name must appear as a
+   contiguous run of whole words in the application name, or vice versa
    - Example: Group `Developers` matches application `MyApp-Developers`
+   - Counter-example: Group `Develop` does **not** match `MyApp-Developers` --
+     it is a substring of a token, not a whole token
 
 2. **Regex-Based Friendly Name Extraction**: Extract a friendly name from the full group name using a regex pattern
    - Example: Group `Dev-Team-AWS` with regex `^([^-]+)` extracts `Dev`, which matches application `MyApp-Dev`
@@ -183,7 +186,7 @@ cdk deploy \
 |-----------|------|----------|---------|-------------|
 | `IdentityCenterInstanceArn` | CloudFormation Parameter | **Yes** | - | ARN of your Identity Center instance. Provided at deployment time via `--parameters`. Find this in IAM Identity Center → Settings. |
 | `ManagementAccountId` | CloudFormation Parameter | **Yes** | - | 12-digit AWS Account ID of the organization's **management account** (Identity Center application ARNs embed it — this is not the delegated admin account you deploy from). Provided at deployment time via `--parameters`. |
-| `GroupNameRegex` | CloudFormation Parameter | No | `""` (empty) | Optional regex pattern to extract friendly group name from full group name. The first capture group is used. Leave empty for default substring matching. |
+| `GroupNameRegex` | CloudFormation Parameter | No | `""` (empty) | Optional regex pattern to extract friendly group name from full group name. The first capture group is used. Leave empty for default whole-word matching. |
 | `enableAutoDeletion` | CDK Context | No | `false` | Enable automatic deletion of non-compliant assignments. When `false`, only notifications are sent. Set via `--context`. |
 | `logRetentionDays` | CDK Context | No | `30` | Number of days to retain CloudWatch logs. Set via `--context`. |
 | `lambdaTimeout` | CDK Context | No | `60` | Lambda function timeout in seconds. Set via `--context`. |

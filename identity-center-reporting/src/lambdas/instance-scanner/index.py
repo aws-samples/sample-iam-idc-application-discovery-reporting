@@ -14,7 +14,7 @@ import logging
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError, BotoCoreError
-from shared.utils import setup_logging, handle_api_error, handle_access_denied_exception, get_aws_client, paginate_api_call, safe_api_call
+from shared.utils import setup_logging, handle_api_error, handle_access_denied_exception, get_aws_client, paginate_api_call, safe_api_call, get_cross_account_external_id
 from shared.models import Instance, InstanceType, DiscoveryResult
 from shared.alerting import (
     alert_manager, send_discovery_failure_alert, track_discovery_metrics,
@@ -284,7 +284,7 @@ def get_delegated_admin_credentials(current_account: str) -> Optional[Dict[str, 
     logger.info(f"Assuming cross-account role in delegated admin account")
 
     CROSS_ACCOUNT_ROLE_NAME = "iam-identity-center-cross-account-discovery-role"
-    EXTERNAL_ID = "iam-identity-center-discovery"
+    EXTERNAL_ID = get_cross_account_external_id()
 
     role_arn = f"arn:aws:iam::{delegated_admin_account}:role/{CROSS_ACCOUNT_ROLE_NAME}"
 
@@ -507,7 +507,7 @@ def discover_account_level_instances(
 
     # Cross-account role configuration
     CROSS_ACCOUNT_ROLE_NAME = "iam-identity-center-cross-account-discovery-role"
-    EXTERNAL_ID = "iam-identity-center-discovery"
+    EXTERNAL_ID = get_cross_account_external_id()
 
     sts_client = get_aws_client('sts')
 

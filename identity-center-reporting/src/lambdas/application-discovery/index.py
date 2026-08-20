@@ -778,7 +778,11 @@ def discover_application_assignments(
                              redact_principal(principal_details.get('name', principal_id)))
                 
             except Exception as e:
-                logger.error(f"Error processing assignment {assignment}: {str(e)}")
+                logger.error(
+                        "Error processing assignment for %s (principal %s): %s",
+                        assignment.get("ApplicationArn", "unknown"),
+                        redact_principal(assignment.get("PrincipalId")), str(e)
+                    )
                 continue
         
         logger.info(f"Successfully processed {len(assignments)} assignments")
@@ -929,9 +933,9 @@ def _resolve_user_details(identity_client, identity_store_id: str, user_id: str)
         
         details['email'] = primary_email
         
-        logger.debug(f"Successfully resolved user: {user_name}")
+        logger.debug("Successfully resolved user: %s", redact_principal(user_name))
     else:
-        logger.warning(f"Could not resolve user {user_id}: {error}")
+        logger.warning("Could not resolve user %s: %s", redact_principal(user_id), error)
         details.update({
             'name': f"User-{user_id}",
             'resolved': False
@@ -971,9 +975,9 @@ def _resolve_group_details(identity_client, identity_store_id: str, group_id: st
             'resolved': True
         })
         
-        logger.debug(f"Successfully resolved group: {group_name}")
+        logger.debug("Successfully resolved group: %s", redact_principal(group_name))
     else:
-        logger.warning(f"Could not resolve group {group_id}: {error}")
+        logger.warning("Could not resolve group %s: %s", redact_principal(group_id), error)
         details.update({
             'name': f"Group-{group_id}",
             'resolved': False

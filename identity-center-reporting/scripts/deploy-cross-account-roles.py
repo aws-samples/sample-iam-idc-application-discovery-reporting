@@ -6,12 +6,32 @@ Deploys the necessary IAM roles in member accounts for cross-account discovery
 
 import argparse
 import json
+from pathlib import Path
+import yaml
+import re
 import boto3
 import time
 from typing import List, Dict, Optional, Tuple
 from botocore.exceptions import ClientError
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+
+def _resolve_cfn_shorthand(text: str) -> str:
+    """
+    Turn the CloudFormation short forms this template uses into plain YAML.
+
+    The template is authored for CloudFormation, so it uses !Sub and !GetAtt.
+    yaml.safe_load rejects those tags, and registering a constructor that returns
+    None would silently drop the values. Rewriting !Sub to its literal string and
+    !GetAtt to Fn::GetAtt keeps the meaning, and the only !Sub in the file is the
+    account-ID substitution this script performs itself.
+    """
+    text = re.sub(r"!Sub\s+'([^']*)'", r'"\1"', text)
+    text = re.sub(r'!GetAtt\s+([A-Za-z0-9.]+)', r'{"Fn::GetAtt": "\1"}', text)
+    text = re.sub(r'!Ref\s+([A-Za-z0-9]+)', r'{"Ref": "\1"}', text)
+    return text
 
 
 class CrossAccountRoleDeployer:
@@ -78,132 +98,66 @@ class CrossAccountRoleDeployer:
             print(f"Error listing organization accounts: {e}")
             return []
     
-    def create_cloudformation_template(self, external_id: str = 'iam-identity-center-discovery') -> Dict:
-        """Create CloudFormation template for cross-account role"""
-        
-        template = {
-            "AWSTemplateFormatVersion": "2010-09-09",
-            "Description": "Cross-account IAM role for IAM Identity Center Discovery",
-            "Parameters": {
-                "SolutionDeployedAccountId": {
-                    "Type": "String",
-                    "Description": "AWS Account ID where the IAM IdC solution is deployed",
-#                    "Default": self.management_account_id,
-                    "AllowedPattern": "[0-9]{12}",
-                    "ConstraintDescription": "Must be a valid 12-digit AWS Account ID"
-                },
-                "ExternalId": {
-                    "Type": "String",
-                    "Description": "External ID for cross-account role assumption",
-                    "Default": external_id
-                }
-            },
-            "Resources": {
-                "CrossAccountDiscoveryRole": {
-                    "Type": "AWS::IAM::Role",
-                    "Properties": {
-                        "RoleName": "iam-identity-center-cross-account-discovery-role",
-                        "Description": "Cross-account role for IAM Identity Center discovery",
-                        "AssumeRolePolicyDocument": {
-                            "Version": "2012-10-17",
-                            "Statement": [
-                                {
-                                    "Effect": "Allow",
-                                    "Principal": {
-                                        "AWS": f"arn:aws:iam::{self.management_account_id}:root"
-                                    },
-                                    "Action": "sts:AssumeRole",
-                                    "Condition": {
-                                        "StringEquals": {
-                                            "sts:ExternalId": external_id
-                                        }
-                                    }
-                                }
-                            ]
-                        },
-                        "Policies": [
-                            {
-                                "PolicyName": "IAMIdentityCenterDiscoveryPolicy",
-                                "PolicyDocument": {
-                                    "Version": "2012-10-17",
-                                    "Statement": [
-                                        {
-                                            "Sid": "IAMIdentityCenterReadAccess",
-                                            "Effect": "Allow",
-                                            # "sso-admin" is the SDK/CLI client
-                                            # name, not an IAM prefix. Every IAM
-                                            # Identity Center action is "sso:".
-                                            "Action": [
-                                                "sso:ListInstances",
-                                                "sso:DescribeInstance",
-                                                "sso:ListApplications",
-                                                "sso:DescribeApplication",
-                                                "sso:DescribeApplicationProvider",
-                                                "sso:ListApplicationAssignments",
-                                                "sso:DescribeApplicationAssignment",
-                                                "sso:ListPermissionSets",
-                                                "sso:DescribePermissionSet"
-                                            ],
-                                            "Resource": "*",
-                                            "Condition": {
-                                                "StringEquals": {
-                                                    "aws:RequestedRegion": self.region
-                                                }
-                                            }
-                                        },
-                                        {
-                                            "Sid": "IdentityStoreReadAccess",
-                                            "Effect": "Allow",
-                                            "Action": [
-                                                "identitystore:DescribeUser",
-                                                "identitystore:DescribeGroup"
-                                            ],
-                                            "Resource": "*",
-                                            "Condition": {
-                                                "StringEquals": {
-                                                    "aws:RequestedRegion": self.region
-                                                }
-                                            }
-                                        }
-                                    ]
-                                }
-                            }
-                        ],
-                        "Tags": [
-                            {
-                                "Key": "Purpose",
-                                "Value": "IAMIdentityCenterDiscovery"
-                            },
-                            {
-                                "Key": "ManagedBy",
-                                "Value": "IAMIdentityCenterDiscoveryStack"
-                            },
-                            {
-                                "Key": "DeployedBy",
-                                "Value": "CrossAccountRoleDeployer"
-                            }
-                        ]
-                    }
-                }
-            },
-            "Outputs": {
-                "CrossAccountRoleArn": {
-                    "Description": "ARN of the cross-account discovery role",
-                    "Value": {"Fn::GetAtt": ["CrossAccountDiscoveryRole", "Arn"]},
-                    "Export": {
-                        "Name": "IAMIdentityCenterDiscovery-CrossAccountRoleArn"
-                    }
-                },
-                "RoleName": {
-                    "Description": "Name of the cross-account discovery role",
-                    "Value": {"Ref": "CrossAccountDiscoveryRole"},
-                    "Export": {
-                        "Name": "IAMIdentityCenterDiscovery-CrossAccountRoleName"
-                    }
-                }
-            }
+    def create_cloudformation_template(self, external_id: str) -> Dict:
+        """
+        Build the cross-account role template.
+
+        external_id is required, with no default. It used to default to the
+        literal string 'iam-identity-center-discovery', which is published in this
+        repository -- an ExternalId only prevents a third party from having a role
+        act on their behalf while the value is unknown to them, so a default that
+        ships in a sample protects nothing. It must match the
+        CrossAccountExternalId parameter given to the reporting stack.
+        """
+        # Values that have appeared in this repository, and so are known to
+        # everyone who has read it. A length check alone does not catch them:
+        # the original hardcoded value is 29 characters.
+        PUBLISHED_VALUES = {
+            'iam-identity-center-discovery',
+            'iam-identity-center-cross-account-discovery-role',
         }
+
+        if not external_id or len(external_id) < 16:
+            raise ValueError(
+                "external_id is required and must be at least 16 characters. "
+                "Generate one (uuidgen works) and pass the same value to the "
+                "reporting stack as --parameters CrossAccountExternalId=<value>."
+            )
+        if external_id in PUBLISHED_VALUES:
+            raise ValueError(
+                f"external_id {external_id!r} has been published in this "
+                f"repository, so it is known to anyone who has read it and "
+                f"provides no confused-deputy protection. Generate a unique value."
+            )
+
         
+        # Read the template from scripts/cross-account-role-template.yaml rather
+        # than embedding a second copy here.
+        #
+        # There used to be a duplicate of the whole template in this function.
+        # Two sources of truth for one role is a drift hazard on its own -- and it
+        # bit immediately: converting the YAML's inline policy to a managed policy
+        # (cfn-guard IAM_NO_INLINE_POLICY_CHECK) would have left this copy still
+        # deploying an inline policy, so the fix would have been cosmetic while the
+        # roles that actually get created stayed unchanged.
+        template_path = Path(__file__).parent / 'cross-account-role-template.yaml'
+        with open(template_path) as handle:
+            template = yaml.safe_load(_resolve_cfn_shorthand(handle.read()))
+
+        # The YAML takes the deploying account as a parameter; this script knows it
+        # already and deploys with a plain template body, so substitute it here and
+        # drop the parameter.
+        rendered = json.dumps(template)
+        rendered = rendered.replace(
+            '${SolutionDeployedAccountId}', self.management_account_id
+        )
+        template = json.loads(rendered)
+        template.pop('Parameters', None)
+
+        trust = (template['Resources']['CrossAccountDiscoveryRole']['Properties']
+                 ['AssumeRolePolicyDocument']['Statement'][0])
+        trust['Condition']['StringEquals']['sts:ExternalId'] = external_id
+
         return template
     
     def assume_role_in_account(self, account_id: str, role_name: str = None) -> Optional[boto3.Session]:
@@ -214,11 +168,17 @@ class CrossAccountRoleDeployer:
             role_arn = f"arn:aws:iam::{account_id}:role/{role_to_assume}"
             
             print(f"     🔐 Attempting to assume role: {role_arn}")
-            
+
+            # No ExternalId here. This assumes the *deployment* role
+            # (OrganizationAccountAccessRole or equivalent) in order to create the
+            # discovery role; it is not the discovery role itself. Organization
+            # admin roles are trusted by account, not by ExternalId, so sending the
+            # discovery ExternalId conflated two unrelated trust relationships --
+            # harmless only because a trust policy without an sts:ExternalId
+            # condition ignores the value.
             response = self.sts.assume_role(
                 RoleArn=role_arn,
-                RoleSessionName=f"IAMIdentityCenterDiscovery-{account_id}",
-                ExternalId="iam-identity-center-discovery"
+                RoleSessionName=f"IAMIdentityCenterDiscovery-{account_id}"
             )
             
             credentials = response['Credentials']
@@ -357,10 +317,11 @@ class CrossAccountRoleDeployer:
             print(f"     ❌ Failed to deploy to {account_name}: {error_msg}")
             return account_id, False, error_msg
     
-    def deploy_to_all_accounts(self, accounts: List[Dict], max_workers: int = 5) -> Dict[str, Tuple[bool, str]]:
+    def deploy_to_all_accounts(self, accounts: List[Dict], external_id: str,
+                               max_workers: int = 5) -> Dict[str, Tuple[bool, str]]:
         """Deploy cross-account roles to all accounts in parallel"""
-        
-        template = self.create_cloudformation_template()
+
+        template = self.create_cloudformation_template(external_id)
         results = {}
         
         # Filter out management account
@@ -402,18 +363,26 @@ class CrossAccountRoleDeployer:
         
         return results
     
-    def validate_role_deployment(self, account_id: str, role_name: str = 'iam-identity-center-cross-account-discovery-role') -> bool:
-        """Validate that the cross-account role was deployed correctly"""
-        
+    def validate_role_deployment(self, account_id: str, external_id: str,
+                                 role_name: str = 'iam-identity-center-cross-account-discovery-role') -> bool:
+        """
+        Validate that the cross-account role was deployed correctly.
+
+        external_id must be the same value passed to create_cloudformation_template:
+        this assumes the discovery role itself, whose trust policy carries an
+        sts:ExternalId condition, so validating with any other value reports a
+        correctly-deployed role as broken.
+        """
+
         try:
             # Try to assume the role
             role_arn = f"arn:aws:iam::{account_id}:role/{role_name}"
             print(f"     🔐 Attempting to assume role: {role_arn}")
-            
+
             response = self.sts.assume_role(
                 RoleArn=role_arn,
                 RoleSessionName=f"ValidationTest-{account_id}",
-                ExternalId="iam-identity-center-discovery"
+                ExternalId=external_id
             )
             
             assumed_role_id = response['AssumedRoleUser']['AssumedRoleId']
@@ -631,6 +600,16 @@ def main():
         description='Deploy cross-account IAM roles for IAM Identity Center Discovery'
     )
     parser.add_argument(
+        '--external-id',
+        required=True,
+        help=(
+            'REQUIRED. Unique ExternalId for the cross-account trust policy. Must '
+            'match the CrossAccountExternalId parameter given to the reporting '
+            'stack. Generate your own (uuidgen); do not reuse a published value, '
+            'because an ExternalId only works while it is not public knowledge.'
+        )
+    )
+    parser.add_argument(
         '--profile', '-p',
         required=False,
         help='AWS profile name to use (optional, uses default credentials if not specified)'
@@ -712,15 +691,15 @@ def main():
         
         if args.dry_run:
             print("DRY RUN MODE - No changes will be made")
-            template = deployer.create_cloudformation_template()
+            template = deployer.create_cloudformation_template(args.external_id)
             print("CloudFormation template that would be deployed:")
             print(json.dumps(template, indent=2))
             sys.exit(0)
         
         # Perform requested action
         if args.action == 'deploy':
-            results = deployer.deploy_to_all_accounts(accounts, args.max_workers)
-            validation_results = deployer.validate_all_deployments(results)
+            results = deployer.deploy_to_all_accounts(accounts, args.external_id, args.max_workers)
+            validation_results = deployer.validate_all_deployments(results, args.external_id)
             deployer.print_deployment_summary(accounts, results, validation_results)
             
             # Exit with error code if any deployments failed
@@ -729,7 +708,7 @@ def main():
             
         elif args.action == 'validate':
             results = {acc['Id']: (True, "Validation target") for acc in accounts}
-            validation_results = deployer.validate_all_deployments(results)
+            validation_results = deployer.validate_all_deployments(results, args.external_id)
             deployer.print_deployment_summary(accounts, results, validation_results)
             
             # Exit with error code if any validations failed

@@ -280,34 +280,72 @@ identity-center-reporting/
 See the [repository README](../README.md) for prerequisites, required IAM permissions, and environment setup.
 
 ### 1. Deploy Solution
+
+> **`CrossAccountExternalId` is required on every deploy, and has no default.**
+> Generate a unique value once and reuse it for this stack and for
+> `scripts/deploy-cross-account-roles.py` — the two must match, or cross-account
+> discovery fails with `AccessDenied`:
+>
+> ```bash
+> export IDC_EXTERNAL_ID="$(uuidgen)"   # keep this; the member-account roles need it too
+> ```
+>
+> There is deliberately no default. The value used to be the literal
+> `iam-identity-center-discovery`, hardcoded in this repository, which protected
+> nothing: `sts:ExternalId` only stops a third party from having the role act on
+> their behalf while the value is unknown to them. The stack rejects that published
+> value if you pass it. The examples further down omit `CrossAccountExternalId` for
+> brevity — add it to each one.
+
 ```bash
 # Validate first: synthesize the template and run the tests
 pip install -r tests/requirements-test.txt
-cdk synth
+cdk synth --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
 python -m pytest tests
 
 # Deploy to development (env defaults to dev; open API by default)
-cdk deploy --parameters AllowedIpRange=0.0.0.0/0
+cdk deploy \
+  --parameters AllowedIpRange=0.0.0.0/0 \
+  --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
 
 # Deploy to production with corporate-network-only access
-CDK_ENVIRONMENT=prod cdk deploy --parameters AllowedIpRange=10.0.0.0/8 --require-approval never
+CDK_ENVIRONMENT=prod cdk deploy \
+  --parameters AllowedIpRange=10.0.0.0/8 \
+  --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID" \
+  --require-approval never
 ```
 
-**AllowedIpRange Parameter:**
-- CIDR block for allowed IP addresses (default: `0.0.0.0/0` allows all)
-- Restricts access to both API Gateway endpoints and S3 presigned URLs
-- ⚠️ **The presigned CSV download URLs carry PII** (user emails, display
-  names). With the `0.0.0.0/0` default, a leaked presigned URL is downloadable
-  from **any IP** with no additional IAM check. The default exists so the
-  sample deploys and demos out of the box; **set this to your corporate/VPN
-  CIDR for any non-demo use.** `cdk synth`/`deploy` emits a notice while the
-  open default is in effect — silence it once acknowledged with
-  `-c acknowledgeOpenIpRange=true`.
+**AllowedIpRange Parameter:** — **required, no default**
+- CIDR block for allowed IP addresses. Restricts both the API Gateway endpoints and
+  the S3 presigned URLs.
+- ⚠️ **The presigned CSV download URLs carry personal data** (user emails, display
+  names). On the API the CIDR sits alongside IAM authentication; on a presigned URL
+  it is the **only** control left once the URL has been issued, because the URL is a
+  bearer token in a query string. Pass `0.0.0.0/0` and a leaked URL — forwarded
+  email, shell history, a ticket attachment — is redeemable from anywhere.
+- There is deliberately **no default**. It used to default to `0.0.0.0/0` behind a
+  synth-time notice, which meant a bare `cdk deploy` produced a stack whose personal-
+  data exports were redeemable from any IP; a notice is not a control, and the
+  deployer who skips the README skips the notice too. `0.0.0.0/0` is still accepted
+  for demos — it just has to be typed, so it is a decision rather than an omission.
+- `cdk synth`/`deploy` emits a notice about the open case until you acknowledge it
+  with `-c acknowledgeOpenIpRange=true`.
 - Examples:
   - Single IP: `203.0.113.45/32`
   - Subnet: `192.168.1.0/24`
   - Corporate network: `10.0.0.0/8`
-  - Allow all (default, demo only): `0.0.0.0/0`
+  - Allow all (demo only, explicit): `0.0.0.0/0`
+
+> **This stack processes personal data.** The tables it writes and the CSVs it
+> exports name individuals and the applications they can reach. Under the
+> [AWS shared responsibility model](https://aws.amazon.com/compliance/shared-responsibility-model/)
+> the deploying account owns lawful basis, notice, data residency, retention, access
+> control, and erasure for that data — which may engage the GDPR, UK GDPR, or
+> CCPA/CPRA depending on your directory population. See
+> [Data protection and your compliance obligations](../README.md#data-protection-and-your-compliance-obligations)
+> in the repository README for the specifics this solution's design forces you to
+> decide, and [AWS compliance resources](https://aws.amazon.com/compliance/) for
+> general guidance. Nothing here is legal advice.
 
 ### 2. Validate Deployment
 
@@ -530,8 +568,8 @@ npm install -g aws-cdk@2.1128.0   # pinned to the validated version
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd identity-center-reporting
+git clone https://github.com/aws-samples/sample-iam-idc-application-discovery-reporting.git
+cd sample-iam-idc-application-discovery-reporting/identity-center-reporting
 
 # Create and activate virtual environment
 python3 -m venv venv
@@ -674,11 +712,43 @@ The solution supports several CloudFormation parameters that can be configured d
 - **Example**: `10.0.0.0/8` or `192.168.1.0/24`
 - **Use Case**: Restrict API access to specific IP ranges for enhanced security
 
+#### CrossAccountExternalId (Required)
+- **Description**: The `sts:ExternalId` the solution's Lambdas present when assuming the
+  discovery role in each member account
+- **Default**: none — the deploy fails without it, by design
+- **Format**: at least 16 characters from `A-Za-z0-9+=,.@:/-`; `uuidgen` output works
+- **Must match**: the `CrossAccountExternalId` given to
+  `scripts/deploy-cross-account-roles.py`, and therefore the `sts:ExternalId` condition on
+  each member-account role's trust policy. A mismatch surfaces as `AccessDenied` on
+  `sts:AssumeRole` inside the Lambda while the state machine still reports `SUCCEEDED`.
+- **Use Case**: Confused-deputy protection on the cross-account role. There is no default
+  because the value used to be the literal `iam-identity-center-discovery`, published in
+  this repository — and an `ExternalId` only works while it is unknown to the party you
+  are guarding against. The stack rejects that specific value, and rejects anything under
+  16 characters; a length check alone would let the old one through at 29.
+- **`NoEcho`**: yes — the value is not echoed in CloudFormation console output
+
 #### enableDynamoDbPitr (Optional, CDK context)
 - **Description**: Enable Point-in-Time Recovery for DynamoDB tables
-- **Default**: `false`
+- **Default**: `true`
 - **Values**: `true` or `false`
-- **Use Case**: Enable continuous backups for the last 35 days (additional cost applies)
+- **Use Case**: Continuous backups for the last 35 days (additional cost applies). These
+  tables are the audit record of who had access to what, so a bad discovery run or an
+  accidental delete should be recoverable — which is also what `AwsSolutions-DDB3`
+  checks. Set `-c enableDynamoDbPitr=false` only for throwaway environments where the
+  continuous-backup cost matters more than the recovery window.
+
+#### disableExecuteApiEndpoint (Optional, CDK context)
+- **Description**: Turn off the export API's default `execute-api.amazonaws.com` endpoint
+- **Default**: `false` (the endpoint stays reachable)
+- **Values**: `true` or `false`
+- **Use Case**: This stack creates no custom domain, so the default endpoint is the only
+  way to reach the export API — disabling it out of the box would deploy an API that
+  nothing can call, including the requests documented below. Access is gated by IAM
+  authentication and the `AllowedIpRange` resource policy regardless, so the endpoint is
+  reachable rather than open. Set `-c disableExecuteApiEndpoint=true` once you have put a
+  custom domain in front of the API, which is the point where the default endpoint is
+  extra surface rather than the only entry point.
 
 #### DelegatedAdminAccountId (Optional)
 - **Description**: AWS Account ID of the delegated administrator for IAM Identity Center
@@ -695,8 +765,15 @@ The solution supports several CloudFormation parameters that can be configured d
 # Deploy with custom IP restriction and delegated admin account
 cdk deploy \
   --parameters AllowedIpRange=10.0.0.0/8 \
-  -c enableDynamoDbPitr=true \
+  --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID" \
   --parameters DelegatedAdminAccountId=123456789012
+```
+
+Then deploy the member-account roles with the *same* ExternalId, or every
+cross-account call is denied:
+
+```bash
+python scripts/deploy-cross-account-roles.py --external-id "$IDC_EXTERNAL_ID"
 ```
 
 ### Post-Deployment Steps
@@ -1469,8 +1546,8 @@ If issues persist:
 ### Quick Start
 ```bash
 # 1. Clone and setup environment
-git clone <repository>
-cd identity-center-reporting
+git clone https://github.com/aws-samples/sample-iam-idc-application-discovery-reporting.git
+cd sample-iam-idc-application-discovery-reporting/identity-center-reporting
 python3 -m venv venv
 source venv/bin/activate  # Linux/Mac
 
@@ -1850,8 +1927,8 @@ We welcome contributions! Please follow these guidelines:
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR-USERNAME/identity-center-reporting.git
-cd identity-center-reporting
+git clone https://github.com/YOUR-USERNAME/sample-iam-idc-application-discovery-reporting.git
+cd sample-iam-idc-application-discovery-reporting/identity-center-reporting
 
 # Create feature branch
 git checkout -b feature/your-feature-name

@@ -24,6 +24,7 @@ from structured_logging import (
     log_remediation_action,
     log_deletion_attempt,
     log_deletion_result,
+    principal_digest,
     log_notification_sent,
     log_error,
     log_processing_complete
@@ -255,7 +256,16 @@ def test_log_validation_result_produces_valid_json(validation_result):
     assert "applicationName" in parsed
     assert "groupName" in parsed
     assert "matchFound" in parsed
-    assert "complianceDetail" in parsed
+
+    # complianceDetail was removed deliberately. It restated groupName,
+    # applicationName and matchFound in prose, which put a second copy of the
+    # resolved group name -- an email address for a federated directory -- in
+    # every compliance entry. Assert its absence so it is not reintroduced as a
+    # convenience field; the structured fields above carry the same information.
+    assert "complianceDetail" not in parsed, (
+        "complianceDetail duplicates groupName/applicationName/matchFound and "
+        "adds a redundant copy of personal data to every log entry"
+    )
     
     # Compliance status should be COMPLIANT or NON_COMPLIANT
     assert parsed["complianceStatus"] in ["COMPLIANT", "NON_COMPLIANT"]
@@ -326,8 +336,17 @@ def test_log_deletion_result_produces_valid_json(deletion_result):
     assert "stage" in parsed
     assert "success" in parsed
     assert "applicationArn" in parsed
-    assert "principalId" in parsed
-    
+    # The digest, not the raw principal ID -- and the raw value must be absent from
+    # the whole line, not merely from that one field. Asserting only
+    # "principalDigest" in parsed would still pass if principalId were logged
+    # beside it, which is exactly how this leak survived: the previous version of
+    # this test asserted the raw field was present, so it held the leak in place.
+    assert "principalDigest" in parsed
+    assert "principalId" not in parsed
+    assert parsed["principalDigest"] == principal_digest(deletion_result.principal_id)
+    if deletion_result.principal_id:
+        assert deletion_result.principal_id not in output
+
     # Should match the deletion result
     assert parsed["success"] == deletion_result.success
     

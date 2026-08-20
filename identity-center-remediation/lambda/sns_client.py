@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 from retry import retry_with_backoff
+from structured_logging import principal_digest
 
 
 class SNSClient:
@@ -47,6 +48,27 @@ class SNSClient:
             Message=message
         )
         return response
+
+
+
+def _caller_role(user_arn: Optional[str]) -> str:
+    """
+    Return the role name from an assumed-role ARN, without the session name.
+
+    The role says which access path was used, which is the part worth auditing.
+    The session name is omitted because for IAM Identity Center it is the user's
+    email address -- an assumed-role ARN looks like
+    ".../AWSReservedSSO_AdminAccess_abc/someone@example.com", so publishing the
+    whole ARN to an SNS topic publishes the operator's email to every subscriber.
+
+    Mirrors the same helper in the reporting stack's csv-export handler.
+    """
+    if not user_arn or user_arn == 'Unknown':
+        return 'Unknown'
+    parts = user_arn.split(':assumed-role/', 1)
+    if len(parts) == 2:
+        return parts[1].split('/', 1)[0]
+    return user_arn.rsplit(':', 1)[-1].split('/', 1)[0] or 'Unknown'
 
 
 def build_notification_message(
@@ -94,13 +116,21 @@ def build_notification_message(
         message_data["applicationArn"] = application_arn
     
     if principal_id:
-        message_data["groupId"] = principal_id  # Changed from principalId to groupId for clarity
-    
+        # Digested, not raw: this message is published to SNS, so every subscriber
+        # receives it. The digest is stable, so alerts about the same principal
+        # still group together.
+        message_data["groupDigest"] = principal_digest(principal_id)
+
     if user_identity:
+        # The caller is identified by role and by a stable digest, not by ARN.
+        # CloudTrail's userIdentity carries the session name, which for an Identity
+        # Center session is the operator's email address -- in both 'arn' and
+        # 'principalId'. CloudTrail itself remains the authoritative, IAM-gated
+        # record of who made the call.
         message_data["initiatedBy"] = {
             "type": user_identity.get('type', 'Unknown'),
-            "arn": user_identity.get('arn', 'Unknown'),
-            "principalId": user_identity.get('principalId', 'Unknown'),
+            "role": _caller_role(user_identity.get('arn')),
+            "callerDigest": principal_digest(user_identity.get('principalId')),
             "accountId": user_identity.get('accountId', 'Unknown')
         }
     

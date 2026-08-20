@@ -274,7 +274,16 @@ class Assignment:
     instance_arn: Optional[str] = None
     assignment_status: str = 'ACTIVE'
     last_updated: Optional[str] = None
-    # Enhanced metadata fields
+    # PERSONAL DATA: principal_display_name and principal_email hold values
+    # resolved from the Identity Store and identify a named individual. Together
+    # with application_arn and the last-accessed fields below, an Assignment says
+    # which person can reach which application and when they last did.
+    #
+    # Consequences for anything handling this model: redact these fields in log
+    # statements (use shared.utils.redact_principal), and treat SNS notification
+    # bodies and CSV exports built from it as carrying personal data. The
+    # deploying account owns lawful basis, retention, residency, and erasure --
+    # see "Data protection and your compliance obligations" in the README.
     principal_display_name: Optional[str] = None
     principal_email: Optional[str] = None
     matched: Optional[str] = None  # 'Yes', 'No', or 'Unknown' for group assignments

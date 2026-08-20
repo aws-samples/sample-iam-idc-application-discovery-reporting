@@ -203,9 +203,13 @@ For each event the monitor Lambda:
 1. Resolves the application name and the principal (group) name from the event,
    using the Identity Store and an optional `GroupNameRegex` to extract a
    friendly group name.
-2. **Validates compliance** — by default it checks (case-insensitive substring
-   match) that the group name appears within the application name, which encodes
-   your naming convention. For example, group `Finance` assigned to application
+2. **Validates compliance** — by default it checks that the group name appears as
+   a whole word in the application name. Matching is case-insensitive and splits
+   both names on `-`, `_`, and whitespace, then requires one side's tokens to
+   appear as a contiguous run of whole tokens in the other. This is deliberately
+   not a substring match: group `read` must not satisfy application
+   `sagemaker_readonly`, and a single-character group name must not satisfy every
+   application containing that character. For example, group `Finance` assigned to application
    `Finance_PROD` is compliant; group `Finance` assigned to `HR_PROD` is not. Use
    the optional `GroupNameRegex` to extract a friendly portion of a longer group
    name (for example, `Finance` from `AWS-Finance-Admins`) before matching.
@@ -257,16 +261,24 @@ cdk bootstrap aws://ACCOUNT-ID/REGION
 cdk synth
 pip install -r tests/requirements-test.txt && python -m pytest tests
 
-# 5. Deploy the solution. AllowedIpRange restricts API Gateway and presigned-URL
+# 5. Generate the cross-account ExternalId. Required, no default — keep it, the
+#    member-account roles must be deployed with the same value.
+export IDC_EXTERNAL_ID="$(uuidgen)"
+
+# 6. Deploy the solution. AllowedIpRange restricts API Gateway and presigned-URL
 #    access — set it to your network's CIDR (default 0.0.0.0/0 allows all).
-cdk deploy --parameters AllowedIpRange=203.0.113.0/24
+cdk deploy \
+  --parameters AllowedIpRange=203.0.113.0/24 \
+  --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
 ```
 
 The stack name is suffixed by the `CDK_ENVIRONMENT` variable (default `dev` →
 `IamIdentityCenterDiscoveryStack-dev`). To deploy separate environments:
 
 ```bash
-CDK_ENVIRONMENT=prod cdk deploy --parameters AllowedIpRange=10.0.0.0/8
+CDK_ENVIRONMENT=prod cdk deploy \
+  --parameters AllowedIpRange=10.0.0.0/8 \
+  --parameters CrossAccountExternalId="$IDC_EXTERNAL_ID"
 ```
 
 Note the output values for the API Gateway URL and the Amazon S3 bucket name —
@@ -295,7 +307,7 @@ CLI from the delegated administration account:
   be the management account — not the delegated admin account you deploy from)
 
 ```bash
-cd identity-center-remediation
+cd ../identity-center-remediation   # from identity-center-reporting
 npm install
 
 INSTANCE_ARN=$(aws sso-admin list-instances \
@@ -398,7 +410,7 @@ To avoid ongoing charges, delete the resources when you no longer need them:
 
 ```bash
 # Reactive monitoring (if deployed)
-cd identity-center-remediation
+cd ../identity-center-remediation   # from identity-center-reporting
 cdk destroy
 
 # Reporting
@@ -495,11 +507,15 @@ review surfaced the following deliberate tradeoffs — review and harden each
 before any non-demo use:
 
 - **Presigned URL exposure (`AllowedIpRange`).** The CSV export API and its
-  presigned Amazon S3 download URLs carry PII (user emails, display names). The
-  `AllowedIpRange` parameter defaults to `0.0.0.0/0` so the sample is
-  demoable, which means a leaked presigned URL is downloadable from **any IP**
-  with no additional IAM check. **Set `AllowedIpRange` to your corporate/VPN
-  CIDR** for anything beyond a demo (`cdk deploy --parameters AllowedIpRange=10.0.0.0/8`).
+  presigned Amazon S3 download URLs carry personal data (user emails, display
+  names). `AllowedIpRange` is a **required parameter with no default** — it used to
+  default to `0.0.0.0/0`, which made a bare `cdk deploy` produce a stack whose
+  exports were redeemable from any IP. On the API the CIDR sits alongside IAM
+  authentication; on a presigned URL it is the only control left once the URL has
+  been issued, since the URL is a bearer token in a query string. `0.0.0.0/0` is
+  still accepted for demos, but it now has to be typed. **Set it to your
+  corporate/VPN CIDR** for anything beyond a demo
+  (`cdk deploy --parameters AllowedIpRange=10.0.0.0/8`).
 - **Export scope.** Any principal with `execute-api:Invoke` can call
   `/export/full` and retrieve the entire organization's assignment data. Add
   per-caller authorization/scoping if you need tenant isolation.
@@ -509,13 +525,17 @@ before any non-demo use:
   per-function roles for a tighter blast radius.
 - **DynamoDB as a trust anchor.** Discovery reads instance ARNs and account IDs
   back from DynamoDB to drive cross-account role assumption. Restrict write
-  access to the governance tables and enable point-in-time recovery
-  (`-c enableDynamoDbPitr=true`) so records can't be silently poisoned
+  access to the governance tables. Point-in-time recovery is on by default
+  (`-c enableDynamoDbPitr=false` opts out) so records can't be silently poisoned
   or destroyed.
-- **Cross-account `ExternalId`.** The cross-account discovery role uses a static
-  `ExternalId` (`iam-identity-center-discovery`). It mitigates the confused-
-  deputy problem but is not a secret; anyone with the template can read it.
-  Use a per-deployment value if your threat model requires it.
+- **Cross-account `ExternalId`.** `CrossAccountExternalId` is a required stack
+  parameter with no default, and the same value must be given to
+  `scripts/deploy-cross-account-roles.py`. It used to be the literal
+  `iam-identity-center-discovery`, hardcoded here — which mitigated nothing:
+  `sts:ExternalId` only prevents a third party from having the role act on their
+  behalf while the value is unknown to them, and that one was published in this
+  repository. Generate a unique value per deployment (`uuidgen` works); the stack
+  and the deploy script both reject the previously published value.
 - **Compliance verdict inputs.** Naming-convention checks compare Identity Store
   group display names against application names. A privileged Identity Store
   admin who renames a group can influence the verdict; treat Identity Store

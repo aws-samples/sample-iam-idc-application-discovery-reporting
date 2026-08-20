@@ -1,5 +1,16 @@
 # Assignment Discovery Lambda Function
 # Discovers assignments (users and groups) for IAM Identity Center applications
+#
+# PERSONAL DATA: this function resolves principal IDs to UserName, DisplayName,
+# and email address from the Identity Store and persists them to DynamoDB, so
+# the tables it writes identify named individuals and the applications they can
+# reach.
+#
+# Under the AWS shared responsibility model the deploying account owns lawful
+# basis, retention, data residency, access control, and erasure for it. Log
+# statements in this module redact principal identifiers through
+# shared.utils.redact_principal for the same reason -- keep new ones consistent.
+# See "Data protection and your compliance obligations" in the repository README.
 
 import json
 import boto3
@@ -160,7 +171,11 @@ def discover_assignments_for_application(
                              redact_principal(principal_details.get('name', principal_id)))
                 
             except Exception as e:
-                logger.error(f"Error processing assignment {assignment}: {str(e)}")
+                logger.error(
+                        "Error processing assignment for %s (principal %s): %s",
+                        assignment.get("ApplicationArn", "unknown"),
+                        redact_principal(assignment.get("PrincipalId")), str(e)
+                    )
                 result.add_error(f"Error processing assignment: {str(e)}")
                 continue
         
@@ -260,7 +275,7 @@ def get_principal_details(
                         details['email'] = email.get('Value')
                         break
                 
-                logger.debug(f"Retrieved user details: {details['name']}")
+                logger.debug("Retrieved user details: %s", redact_principal(details['name']))
             else:
                 logger.warning("Could not describe user %s: %s", redact_principal(principal_id), error)
                 details['name'] = f"User-{principal_id}"
@@ -283,7 +298,7 @@ def get_principal_details(
                 details['name'] = group_data.get('DisplayName', principal_id)
                 details['display_name'] = group_data.get('DisplayName')
                 
-                logger.debug(f"Retrieved group details: {details['name']}")
+                logger.debug("Retrieved group details: %s", redact_principal(details['name']))
             else:
                 logger.warning("Could not describe group %s: %s", redact_principal(principal_id), error)
                 details['name'] = f"Group-{principal_id}"

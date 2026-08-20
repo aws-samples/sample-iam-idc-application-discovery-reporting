@@ -30,13 +30,30 @@ class RollbackManager:
         self.stepfunctions = self.session.client('stepfunctions')
         
         self.backup_metadata = {}
-    
+        self._cached_account_id = None
+
+    def _account_id(self) -> str:
+        """
+        Return the deploying account ID, for naming the backup bucket.
+
+        The bucket name previously embedded the first eight characters of the AWS
+        access key and printed the resulting name to stdout, which put a fragment
+        of credential material into terminal output, CI logs, and anything that
+        captured them. An account ID is the right discriminator here: it is not
+        secret, it is stable across credential rotation -- so a rotated key no
+        longer orphans the previous backup bucket -- and it is already visible in
+        every ARN this script handles.
+        """
+        if self._cached_account_id is None:
+            self._cached_account_id = self.session.client('sts').get_caller_identity()['Account']
+        return self._cached_account_id
+
     def create_data_backup(self) -> bool:
         """Create backup of critical data before rollback"""
         print("💾 Creating data backup before rollback...")
         
         backup_timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-        backup_bucket = f"iam-identity-center-backups-{self.session.get_credentials().access_key[:8].lower()}"
+        backup_bucket = f"iam-identity-center-backups-{self._account_id()}"
         
         try:
             # Create backup bucket if it doesn't exist
@@ -311,7 +328,7 @@ class RollbackManager:
         """Restore data from a previous backup"""
         print(f"📥 Restoring data from backup: {backup_timestamp}")
         
-        backup_bucket = f"iam-identity-center-backups-{self.session.get_credentials().access_key[:8].lower()}"
+        backup_bucket = f"iam-identity-center-backups-{self._account_id()}"
         
         try:
             # Load backup metadata
@@ -435,7 +452,7 @@ class RollbackManager:
     
     def list_available_backups(self) -> List[str]:
         """List available backups"""
-        backup_bucket = f"iam-identity-center-backups-{self.session.get_credentials().access_key[:8].lower()}"
+        backup_bucket = f"iam-identity-center-backups-{self._account_id()}"
         
         try:
             response = self.s3.list_objects_v2(

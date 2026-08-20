@@ -7,6 +7,7 @@ Property-based tests for SNS notification system.
 
 import pytest
 import json
+from structured_logging import principal_digest
 from unittest.mock import Mock, MagicMock, patch
 from hypothesis import given, strategies as st, settings, assume
 from datetime import datetime
@@ -53,6 +54,7 @@ actions = st.sampled_from(['DELETED', 'NOTIFICATION_ONLY'])
 
 # Strategy for status
 statuses = st.sampled_from(['SUCCESS', 'FAILED'])
+
 
 
 class TestSNSNotificationOnNonCompliance:
@@ -476,11 +478,23 @@ class TestCompleteNotificationMessageFormat:
         
         # Verify optional fields are present
         assert 'applicationArn' in message_data
-        assert 'groupId' in message_data
+        assert 'groupDigest' in message_data
+        assert 'groupId' not in message_data
         
         # Verify optional field values
         assert message_data['applicationArn'] == application_arn
-        assert message_data['groupId'] == principal_id
+        # Digest, not the raw principal ID -- and the raw value must be absent from
+        # the whole message, since this is published to SNS and reaches every
+        # subscriber.
+        assert message_data['groupDigest'] == principal_digest(principal_id)
+        # "the raw ID appears nowhere in the payload" is asserted in
+        # TestNotificationFormatting.test_optional_fields_included_when_provided,
+        # against a realistic UUID. It cannot be stated here: hypothesis generates
+        # principal_id and account_id from overlapping alphabets and will produce
+        # runs where they are equal, so the value is genuinely present in the
+        # message as the account ID and the assertion would fail on a coincidence
+        # rather than a leak. The two assertions above pin the behaviour of this
+        # function -- the key is gone and the digest is correct.
 
 
 
@@ -645,9 +659,64 @@ class TestNotificationFormatting:
         assert 'applicationArn' in message_data
         assert message_data['applicationArn'] == 'arn:aws:sso:::application/test-app'
         
-        assert 'groupId' in message_data
-        assert message_data['groupId'] == 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6'
+        assert 'groupDigest' in message_data
+        assert 'groupId' not in message_data
+        # Digest, not the raw principal ID -- and the raw value must be absent from
+        # the whole message, since this is published to SNS and reaches every
+        # subscriber.
+        assert message_data['groupDigest'] == principal_digest('f81d4fae-7dec-11d0-a765-00a0c91e6bf6')
+        assert 'f81d4fae-7dec-11d0-a765-00a0c91e6bf6' not in message
     
+    def test_initiated_by_omits_the_caller_session_name(self):
+        """
+        The caller is published as role + digest, never as an ARN or principalId.
+
+        user_identity comes from CloudTrail, where an IAM Identity Center session
+        carries the operator's email as the session name -- in both 'arn'
+        (".../AWSReservedSSO_AdminAccess_abc/someone@example.com") and 'principalId'
+        ("AROAEXAMPLE:someone@example.com"). This message is published to SNS, so
+        those fields would deliver the email to every subscriber. CloudTrail stays
+        the authoritative, IAM-gated record of who made the call.
+
+        The user_identity branch had no test at all, which is why removing the
+        redaction did not fail anything.
+        """
+        caller_arn = (
+            'arn:aws:sts::123456789012:assumed-role/'
+            'AWSReservedSSO_AdministratorAccess_abc123/someone@example.com'
+        )
+        caller_principal_id = 'AROAEXAMPLEID:someone@example.com'
+
+        message = build_notification_message(
+            application_name='TestApp',
+            group_name='TestGroup',
+            account_id='123456789012',
+            timestamp='2025-12-16T10:30:00Z',
+            action='DELETED',
+            status='SUCCESS',
+            user_identity={
+                'type': 'AssumedRole',
+                'arn': caller_arn,
+                'principalId': caller_principal_id,
+                'accountId': '123456789012',
+            },
+        )
+        message_data = json.loads(message)
+        initiated_by = message_data['initiatedBy']
+
+        # The access path is kept -- that is the auditable part.
+        assert initiated_by['role'] == 'AWSReservedSSO_AdministratorAccess_abc123'
+        assert initiated_by['type'] == 'AssumedRole'
+        assert initiated_by['accountId'] == '123456789012'
+        assert initiated_by['callerDigest'] == principal_digest(caller_principal_id)
+
+        # The identity is not.
+        assert 'arn' not in initiated_by
+        assert 'principalId' not in initiated_by
+        assert 'someone@example.com' not in message
+        assert caller_arn not in message
+        assert caller_principal_id not in message
+
     def test_optional_fields_omitted_when_not_provided(self):
         """
         Test that optional fields are omitted when not provided.
@@ -669,5 +738,6 @@ class TestNotificationFormatting:
         
         # Verify optional fields are not present
         assert 'applicationArn' not in message_data
+        assert 'groupDigest' not in message_data
         assert 'groupId' not in message_data
         assert 'errorMessage' not in message_data

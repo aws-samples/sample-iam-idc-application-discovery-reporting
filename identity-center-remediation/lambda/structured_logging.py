@@ -5,6 +5,7 @@ This module provides JSON-formatted logging with helper functions for each
 processing stage. All logs include contextual information for audit and troubleshooting.
 """
 
+import hashlib
 import json
 import logging
 import sys
@@ -177,7 +178,7 @@ def log_event_parsing(
     if success and parsed_data:
         log_data.update({
             "applicationArn": parsed_data.get("application_arn", ""),
-            "principalId": parsed_data.get("principal_id", ""),
+            "principalDigest": principal_digest(parsed_data.get("principal_id")),
             "principalType": parsed_data.get("principal_type", ""),
             "accountId": parsed_data.get("account_id", ""),
             "eventTime": parsed_data.get("event_time", "")
@@ -231,15 +232,44 @@ def log_validation_result(
         "validationReason": reason
     }
     
-    # Add substring match details for better visibility
+    # matchFound carries the verdict. There is deliberately no complianceDetail
+    # field: it restated groupName, applicationName and matchFound in prose, so it
+    # was a second copy of the group name -- a resolved Identity Store display
+    # name, which is an email address for a directory federated from an
+    # email-based source -- in every compliance log entry. Removing it drops the
+    # duplicate without losing anything an operator can act on.
+    #
+    # groupName itself is kept unredacted, and that is a decision rather than an
+    # oversight: this entry is the compliance alert. One that will not say which
+    # group was assigned cannot be triaged. The consequence is that this log group
+    # holds personal data, so scope who can read it -- the same reasoning applies
+    # to the SNS topic in the reporting stack.
     if is_compliant:
         log_data["matchFound"] = True
-        log_data["complianceDetail"] = f"Group '{grp_name}' found in application '{app_name}'"
         logger.info("✓ COMPLIANT - Group name found in application name", **log_data)
     else:
         log_data["matchFound"] = False
-        log_data["complianceDetail"] = f"Group '{grp_name}' NOT found in application '{app_name}'"
         logger.warn("✗ NON-COMPLIANT - Group name not found in application name", **log_data)
+
+
+def principal_digest(principal_id: Optional[str]) -> str:
+    """
+    Reduce a principal identifier to a short, non-reversible digest.
+
+    A raw Identity Store principal ID in a log line states which specific person
+    held which access. The digest is stable, so entries for the same principal still
+    correlate across the parse/attempt/result stages of one deletion, and an
+    operator who needs the real identifier has CloudTrail's record of the
+    DeleteApplicationAssignment call -- which is the authoritative audit trail for a
+    destructive action, and is access-controlled.
+
+    This is deliberately unlike the groupName decision below, where the resolved
+    name IS the alert and is kept. Here the principal ID is a join key, and a digest
+    joins just as well.
+    """
+    if not principal_id:
+        return ""
+    return hashlib.sha256(str(principal_id).encode("utf-8")).hexdigest()[:12]
 
 
 def log_remediation_action(
@@ -289,7 +319,7 @@ def log_deletion_attempt(
         "stage": "deletion",
         "action": "attempting_deletion",
         "applicationArn": application_arn,
-        "principalId": principal_id,
+        "principalDigest": principal_digest(principal_id),
         "principalType": principal_type
     }
     
@@ -324,7 +354,7 @@ def log_deletion_result(deletion_result: Any):
         "action": "deletion_result",
         "success": result_dict.get('success', False),
         "applicationArn": result_dict.get('application_arn', ''),
-        "principalId": result_dict.get('principal_id', '')
+        "principalDigest": principal_digest(result_dict.get('principal_id'))
     }
     
     if not result_dict.get('success'):

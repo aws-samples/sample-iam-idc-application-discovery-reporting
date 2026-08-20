@@ -238,6 +238,14 @@ def handle_full_discovery_change_detection(event: Dict[str, Any],
         if all_changes:
             incremental_manager.save_changes(all_changes)
             logger.info(f"Saved {len(all_changes)} changes to change log")
+
+            # Retire rows whose deletion is now recorded, so the next run does not
+            # re-derive the same set difference and log the deletion again. Strictly
+            # after save_changes: retiring first would let a failed write lose the
+            # deletion from the audit trail permanently.
+            retired = incremental_manager.retire_deleted_resources(all_changes)
+            if retired:
+                logger.info(f"Retired {retired} deleted resource(s) from active tables")
         
         # Update discovery state
         state = IncrementalDiscoveryState(
@@ -385,6 +393,17 @@ def send_change_notifications(changes: List[ChangeRecord], discovery_run_id: str
         resource_type, change_type = category.split('_', 1)
         message_parts.append(f"• {change_type.title()} {resource_type}s: {len(category_changes)}")
         
+        # PERSONAL DATA: for assignment changes this body names the principal.
+        # That is deliberate and is not redacted -- an alert that will not say who
+        # gained or lost access cannot be acted on, which is the opposite of the
+        # log statements in this solution, where the same value is redacted
+        # because logs are broad and long-lived.
+        #
+        # The consequence is that the SNS topic is a personal-data channel. Scope
+        # its subscriptions to the people entitled to see who holds which access,
+        # and remember that email subscriptions copy the data into mailboxes
+        # outside this account's retention controls.
+        #
         # Add details for first few changes
         for i, change in enumerate(category_changes[:5]):  # Limit to first 5 to avoid message size limits
             if resource_type == 'application':

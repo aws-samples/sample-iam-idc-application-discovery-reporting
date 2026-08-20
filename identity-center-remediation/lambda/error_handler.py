@@ -6,10 +6,14 @@ and error notification building for the Identity Center application monitor.
 """
 
 import json
+import logging
 import traceback
 from typing import Dict, Any, Optional
 from enum import Enum
 from datetime import datetime, timezone
+from structured_logging import principal_digest
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorCategory(Enum):
@@ -128,7 +132,20 @@ def build_error_notification(
     error_category = categorize_error(exception)
     severity = determine_severity(error_category)
     
-    # Build error notification
+    # The stack trace goes to CloudWatch, not into the notification.
+    #
+    # This payload is published to SNS with shouldNotify=True, so it reaches every
+    # subscriber -- email, SMS, whatever is attached. A traceback carries whatever
+    # the exception message happened to interpolate, and in this codebase that is
+    # routinely a principal ID or an application ARN. CloudWatch access is gated by
+    # IAM; an SNS subscription list is not, so the trace belongs in the log and a
+    # bounded summary belongs in the notification.
+    logger.error(
+        "Error notification built for %s: %s",
+        type(exception).__name__,
+        traceback.format_exc(),
+    )
+
     notification = {
         "timestamp": timestamp,
         "eventType": "ERROR",
@@ -136,10 +153,9 @@ def build_error_notification(
         "errorCategory": error_category.value,
         "errorMessage": str(exception),
         "errorType": type(exception).__name__,
-        "stackTrace": traceback.format_exc(),
         "context": context
     }
-    
+
     return notification
 
 
@@ -244,7 +260,8 @@ def handle_global_exception(
     
     if parsed_data:
         context['applicationArn'] = parsed_data.get('application_arn', 'unknown')
-        context['principalId'] = parsed_data.get('principal_id', 'unknown')
+        # Digest, not the raw ID: this context is embedded in the SNS notification.
+        context['principalDigest'] = principal_digest(parsed_data.get('principal_id'))
         context['accountId'] = parsed_data.get('account_id', context.get('accountId', 'unknown'))
     
     # Build error notification

@@ -67,7 +67,20 @@ class IAMIdentityCenterExportClient:
         if response.status_code == 200:
             return response.json()
         else:
-            logger.error(f"API request failed: {response.status_code} - {response.text}")
+            # Status and request ID only, never response.text.
+            #
+            # This endpoint returns the CSV exports, so a body logged here can hold
+            # user emails and display names -- and on a partial or streamed failure
+            # it can hold export rows themselves. The status says what went wrong and
+            # the request ID is what AWS Support needs; neither carries personal
+            # data. Read the body interactively if you need it, rather than writing
+            # it to whatever log stream this client happens to run under.
+            logger.error(
+                "API request failed: %s (request id: %s, %s bytes withheld)",
+                response.status_code,
+                response.headers.get('x-amzn-RequestId', 'unknown'),
+                response.headers.get('Content-Length', 'unknown'),
+            )
             response.raise_for_status()
     
     def export_applications(self, filters: Optional[Dict[str, str]] = None) -> Dict[str, Any]:

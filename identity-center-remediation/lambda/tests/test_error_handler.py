@@ -19,6 +19,7 @@ from error_handler import (
     ErrorSeverity
 )
 from event_parser import EventParsingError, parse_event
+from structured_logging import principal_digest
 from botocore.exceptions import ClientError
 
 
@@ -132,7 +133,11 @@ def test_property_graceful_malformed_event_handling(event):
     assert 'severity' in error
     assert 'errorCategory' in error
     assert 'errorMessage' in error
-    assert 'stackTrace' in error
+    # The stack trace must NOT reach the notification: this payload is published
+    # to SNS, and a traceback carries whatever the exception message interpolated,
+    # which in this codebase is routinely a principal ID. It is logged to
+    # CloudWatch instead, where IAM controls who can read it.
+    assert 'stackTrace' not in error
     assert 'context' in error
     
     # Verify error is categorized as PARSING (EventParsingError should always be PARSING)
@@ -208,7 +213,11 @@ def test_build_error_notification():
     assert 'Missing ApplicationArn' in notification['errorMessage']
     assert notification['context'] == context
     assert 'timestamp' in notification
-    assert 'stackTrace' in notification
+    # The stack trace must NOT reach the notification: this payload is published
+    # to SNS, and a traceback carries whatever the exception message interpolated,
+    # which in this codebase is routinely a principal ID. It is logged to
+    # CloudWatch instead, where IAM controls who can read it.
+    assert 'stackTrace' not in notification
 
 
 def test_format_error_notification_message():
@@ -375,7 +384,11 @@ def test_property_global_exception_handling(exception, event, parsed_data):
     assert 'errorCategory' in error
     assert 'errorMessage' in error
     assert 'errorType' in error
-    assert 'stackTrace' in error
+    # The stack trace must NOT reach the notification: this payload is published
+    # to SNS, and a traceback carries whatever the exception message interpolated,
+    # which in this codebase is routinely a principal ID. It is logged to
+    # CloudWatch instead, where IAM controls who can read it.
+    assert 'stackTrace' not in error
     assert 'context' in error
     
     # Verify error message contains the exception message
@@ -398,7 +411,13 @@ def test_property_global_exception_handling(exception, event, parsed_data):
     if parsed_data and 'application_arn' in parsed_data:
         assert context['applicationArn'] == parsed_data['application_arn']
     if parsed_data and 'principal_id' in parsed_data:
-        assert context['principalId'] == parsed_data['principal_id']
+        # Held as a digest, never raw. Stated as a property over every principal
+        # hypothesis generates rather than one example: the notification goes to
+        # SNS, so "no raw principal ID reaches the payload" has to hold for all
+        # inputs, not just the one a unit test happened to pick.
+        assert context['principalDigest'] == principal_digest(parsed_data['principal_id'])
+        assert 'principalId' not in context
+        assert parsed_data['principal_id'] not in json.dumps(result)
 
 
 # Unit tests for error scenarios
@@ -514,7 +533,14 @@ def test_handle_global_exception_with_full_context():
     assert context['eventSource'] == 'aws.sso'
     assert context['accountId'] == '123456789012'
     assert context['applicationArn'] == 'arn:aws:sso:::application/test'
-    assert context['principalId'] == 'principal-456'
+    # A digest, not the raw principal ID: this context is embedded in the SNS
+    # notification, so it reaches every subscriber. Assert both halves -- that the
+    # digest is present and stable, and that the raw identifier is absent -- because
+    # asserting only the digest would still pass if the raw value were added back
+    # alongside it.
+    assert 'principalId' not in context
+    assert context['principalDigest'] == principal_digest('principal-456')
+    assert 'principal-456' not in json.dumps(result)
 
 
 def test_handle_global_exception_with_no_context():

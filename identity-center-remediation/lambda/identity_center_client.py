@@ -55,30 +55,6 @@ class IdentityCenterClient:
                 pass
             return ''
 
-    @staticmethod
-    def _extract_account_from_arn(arn: str) -> Optional[str]:
-        """
-        Extract AWS account ID from an ARN.
-        
-        Note: Identity Center instance ARNs use format arn:aws:sso:::instance/xxx
-        (three colons, no account), so this will return None for instance ARNs.
-        Application ARNs use format arn:aws:sso::account:application/xxx.
-        
-        Args:
-            arn: AWS ARN
-            
-        Returns:
-            Account ID or None if not present in ARN
-        """
-        try:
-            parts = arn.split(':')
-            if len(parts) >= 5 and parts[4]:  # Check if account field is not empty
-                return parts[4]
-            return None
-        except Exception:
-            return None
-    
-
     def delete_application_assignment(
         self,
         application_arn: str,

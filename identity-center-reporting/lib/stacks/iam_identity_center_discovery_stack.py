@@ -46,6 +46,22 @@ class IamIdentityCenterDiscoveryStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # PERSONAL DATA AND COMPLIANCE
+        #
+        # This stack provisions storage and an export path for personal data about
+        # the people in the Identity Center directory: user names, display names,
+        # email addresses, and a per-person record of which applications they can
+        # reach and when they last used them. It lands in DynamoDB, in CSV objects
+        # in S3, and in CloudWatch Logs, in whichever Region you deploy to.
+        #
+        # The deploying account is responsible for assessing which data-protection
+        # regimes apply -- GDPR and UK GDPR, CCPA/CPRA, or sector rules -- and for
+        # lawful basis, residency, retention, access, and erasure. Note that
+        # point-in-time recovery defaults to enabled below, which extends how long
+        # this data stays recoverable after deletion. See "Data protection and your
+        # compliance obligations" and "Security considerations for production" in
+        # the repository README.
+        #
         # Create CDK parameter for IP restriction.
         # SECURITY: this CIDR restricts both the API Gateway and the S3
         # presigned-URL downloads, which carry PII (user emails/display names).
@@ -54,27 +70,49 @@ class IamIdentityCenterDiscoveryStack(Stack):
         # with no additional IAM check. For any non-demo use, set this to your
         # corporate/VPN CIDR. See "Security considerations for production" in
         # the README.
+        # No default, deliberately.
+        #
+        # This CIDR is applied to two things: the API Gateway resource policy, where
+        # IAM authentication is also required, and the presigned-URL bucket policy,
+        # where it is the *only* control left once a URL has been issued. A presigned
+        # URL is a bearer token in a query string; if it leaks -- forwarded email,
+        # shell history, a ticket attachment -- the IP condition is what stops it
+        # being redeemed, and those CSVs carry user emails and display names.
+        #
+        # It used to default to 0.0.0.0/0 with a synth-time notice. A notice is not a
+        # control: `cdk deploy` with no arguments produced a stack whose PII exports
+        # were redeemable from anywhere, and the deployer who did not read the README
+        # was exactly the one who did not read the annotation either. With no default
+        # the value has to be typed, so 0.0.0.0/0 becomes a decision rather than an
+        # omission. It is still accepted -- demos need it -- and the notice below
+        # still fires for it.
         self.allowed_ip_range = cdk.CfnParameter(
             self, "AllowedIpRange",
             type="String",
-            description="CIDR allowed to reach the API and download presigned CSV URLs (which contain PII). Default 0.0.0.0/0 allows ALL IPs — set to your corporate/VPN CIDR for anything beyond a demo.",
-            default="0.0.0.0/0",
+            description=(
+                "REQUIRED. CIDR allowed to reach the API and redeem presigned CSV "
+                "URLs, which contain personal data (user emails, display names). "
+                "There is no default: set your corporate/VPN CIDR, or pass "
+                "0.0.0.0/0 to accept that exported personal data is downloadable "
+                "from any IP."
+            ),
             allowed_pattern="^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$",
             constraint_description="Must be a valid CIDR block (e.g., 10.0.0.0/8, 192.168.1.0/24, or 0.0.0.0/0 for all)"
         )
 
-        # Surface a synth-time warning when the default open range is in effect
-        # via context override (cdk deploy -c acknowledgeOpenIpRange=true to
-        # silence). CfnParameter values are resolved at deploy time, not synth,
-        # so this warns based on whether the deployer has explicitly acknowledged.
+        # Synth-time notice for the open range. CfnParameter values resolve at deploy
+        # time, not synth, so this cannot test the value the deployer passed -- it
+        # keys off whether they have explicitly acknowledged the open case.
+        # Silence with `-c acknowledgeOpenIpRange=true`.
         if not self.node.try_get_context("acknowledgeOpenIpRange"):
             cdk.Annotations.of(self).add_info(
-                "AllowedIpRange defaults to 0.0.0.0/0 (open). Presigned CSV URLs "
-                "carry PII and will be downloadable from any IP. Pass "
-                "--parameters AllowedIpRange=<your-CIDR> for non-demo use, or "
-                "-c acknowledgeOpenIpRange=true to silence this notice."
+                "AllowedIpRange is required and has no default. Passing 0.0.0.0/0 "
+                "leaves presigned CSV URLs -- which carry personal data -- "
+                "redeemable from any IP; the IP condition is the only control on a "
+                "presigned URL once it has been issued. Pass your own CIDR for "
+                "non-demo use, or -c acknowledgeOpenIpRange=true to silence this."
             )
-        
+
         # Create CDK parameter for DynamoDB Point-in-Time Recovery
         # Point-in-Time Recovery is a SYNTH-TIME flag, not a CloudFormation
         # parameter. A CfnParameter's value is a deploy-time token, so
@@ -90,7 +128,21 @@ class IamIdentityCenterDiscoveryStack(Stack):
         self.enable_dynamodb_pitr = (
             str(self.node.try_get_context("enableDynamoDbPitr") or "true").lower() != "false"
         )
-        
+
+        # Whether to switch off the default execute-api.amazonaws.com endpoint on the
+        # export API.
+        #
+        # Defaults to DISABLED (endpoint stays reachable), because this stack creates
+        # no custom domain: turning the default endpoint off without one deploys an
+        # API that nothing can reach, including the calls the README documents.
+        # Set it once a custom domain is in front of the API --
+        # `-c disableExecuteApiEndpoint=true` -- which is the point where the default
+        # endpoint is extra surface rather than the only way in. IAM authentication
+        # and the IP-range resource policy apply either way.
+        self.disable_execute_api_endpoint = (
+            str(self.node.try_get_context("disableExecuteApiEndpoint") or "false").lower() == "true"
+        )
+
         # Create CDK parameter for Delegated Admin Account ID
         self.delegated_admin_account_id = cdk.CfnParameter(
             self, "DelegatedAdminAccountId",
@@ -120,6 +172,118 @@ class IamIdentityCenterDiscoveryStack(Stack):
             min_value=1,
             max_value=365,
             constraint_description="Must be a number between 1 and 365"
+        )
+
+        # ExternalId the discovery Lambdas present when assuming the cross-account
+        # role in each member account.
+        #
+        # REQUIRED, with no default, and that is the point. This value used to be
+        # the literal string "iam-identity-center-discovery", hardcoded in both
+        # shared/utils.py and the cross-account role template. An ExternalId
+        # published in a sample protects nothing: sts:ExternalId exists to stop a
+        # third party from tricking a role into acting on their behalf, and it can
+        # only do that while the value is unknown to them. Everyone who reads this
+        # repository knew the old one.
+        #
+        # A default would defeat it again -- most deployers would keep whatever
+        # shipped. So CloudFormation refuses the deploy until a value is supplied,
+        # and the same value must be given to
+        # scripts/deploy-cross-account-roles.py so the trust policies match.
+        # Treat it as a shared secret between the two: not a password, but not
+        # something to publish either.
+        self.cross_account_external_id = cdk.CfnParameter(
+            self, "CrossAccountExternalId",
+            type="String",
+            description=(
+                "REQUIRED. Unique ExternalId the discovery Lambdas present when assuming "
+                "the cross-account role. Generate your own (e.g. uuidgen) and pass the "
+                "same value to scripts/deploy-cross-account-roles.py. Do not reuse the "
+                "value from any published example -- an ExternalId only works while it "
+                "is not public knowledge."
+            ),
+            min_length=16,
+            max_length=1224,
+            allowed_pattern=r"^[A-Za-z0-9+=,.@:\/-]{16,}$",
+            constraint_description=(
+                "Must be at least 16 characters. Allowed characters: letters, digits, "
+                "and + = , . @ : / -"
+            ),
+            no_echo=True
+        )
+
+        # Refuse the value that used to be hardcoded here. AllowedPattern cannot
+        # express "anything except this string", so it takes a CfnRule -- which
+        # CloudFormation evaluates before creating anything, so a deploy reusing the
+        # published value fails outright rather than succeeding insecurely.
+        cdk.CfnRule(
+            self, "CrossAccountExternalIdMustNotBePublished",
+            assertions=[
+                cdk.CfnRuleAssertion(
+                    assert_=cdk.Fn.condition_not(
+                        cdk.Fn.condition_equals(
+                            self.cross_account_external_id.value_as_string,
+                            "iam-identity-center-discovery"
+                        )
+                    ),
+                    assert_description=(
+                        "CrossAccountExternalId must not be 'iam-identity-center-discovery'. "
+                        "That value was hardcoded in earlier versions of this sample and is "
+                        "published in the repository, so it is known to anyone who has read "
+                        "it and provides no confused-deputy protection. Generate a unique value."
+                    )
+                )
+            ]
+        )
+
+        # Identity Center instance ARN used to scope this stack's sso permissions.
+        #
+        # Named and typed to match the reactive-monitoring stack's
+        # IdentityCenterInstanceArn parameter, and the instance ID is derived from
+        # it the same way, with Fn::Split on "instance/". One convention across both
+        # stacks, so an operator supplies the same value in the same form to either.
+        #
+        # The difference between the two is the default, and it is deliberate.
+        # Reactive monitoring watches one instance, so its ARN is required. This
+        # stack exists to DISCOVER instances across an organization and its member
+        # accounts, so it defaults to arn:aws:sso:::instance/*, which derives to a
+        # bare "*" and leaves the permissions scoped by resource type only. That is
+        # the behaviour this stack has always had. Narrowing it by default would
+        # silently reduce an organization-wide report to a single instance -- the
+        # account this was developed against has three instances in three accounts.
+        #
+        # Supply a real ARN
+        #   cdk deploy --parameters IdentityCenterInstanceArn=arn:aws:sso:::instance/ssoins-...
+        # only when one instance is genuinely all you want inventoried, and the
+        # resources below tighten from
+        #   arn:aws:sso:::instance/*          to  arn:aws:sso:::instance/ssoins-...
+        #   arn:aws:sso::*:application/*/*    to  arn:aws:sso::*:application/ssoins-.../*
+        #   arn:aws:sso:::permissionSet/*/*   to  arn:aws:sso:::permissionSet/ssoins-.../*
+        #
+        # The wildcard default is expressed as a whole ARN rather than a bare "*"
+        # so that Fn::Split always yields two elements. Splitting a bare "*" on
+        # "instance/" gives a single-element list, and Fn::Select(1, ...) on that
+        # fails at deploy time -- a CloudFormation error, not a fallback.
+        self.instance_arn_scope = cdk.CfnParameter(
+            self, "IdentityCenterInstanceArn",
+            type="String",
+            description=(
+                "(Optional) IAM Identity Center instance ARN used to scope this stack's "
+                "IAM permissions to a single instance, e.g. "
+                "arn:aws:sso:::instance/ssoins-1234567890abcdef. Leave the default "
+                "(arn:aws:sso:::instance/*) to inventory every instance the role can "
+                "reach, which organization-wide discovery across member accounts requires."
+            ),
+            default="arn:aws:sso:::instance/*",
+            allowed_pattern=r"^arn:aws:sso:::instance/(\*|ssoins-[a-zA-Z0-9]+)$",
+            constraint_description=(
+                "Must be arn:aws:sso:::instance/* or a specific instance ARN "
+                "(arn:aws:sso:::instance/ssoins-...)"
+            )
+        )
+
+        # Derived exactly as the reactive-monitoring stack does it.
+        self.instance_id_scope = cdk.Fn.select(
+            1, cdk.Fn.split('instance/', self.instance_arn_scope.value_as_string)
         )
 
         # Create KMS keys for encryption
@@ -802,7 +966,8 @@ class IamIdentityCenterDiscoveryStack(Stack):
             "POWERTOOLS_SERVICE_NAME": "iam-identity-center-discovery",
             "POWERTOOLS_METRICS_NAMESPACE": "IAMIdentityCenter/Discovery",
             "DELEGATED_ADMIN_ACCOUNT_ID": self.delegated_admin_account_id.value_as_string,
-            "GROUP_NAME_REGEX": self.group_name_regex.value_as_string
+            "GROUP_NAME_REGEX": self.group_name_regex.value_as_string,
+            "CROSS_ACCOUNT_EXTERNAL_ID": self.cross_account_external_id.value_as_string
         }
         
         # Create enhanced Lambda execution role with least privilege
@@ -868,7 +1033,19 @@ class IamIdentityCenterDiscoveryStack(Stack):
                             sid="SSOPortalAPIAccess",
                             effect=iam.Effect.ALLOW,
                             actions=[
-                                "sso:ListInstances",
+                                # sso:ListInstances is deliberately NOT here. It
+                                # has no resource type, and IAM evaluates it
+                                # against the literal resource
+                                # arn:aws:sso:::instance/* -- which a specific
+                                # instance ARN can never match. Granting it
+                                # alongside the scopeable actions worked only
+                                # while IdentityCenterInstanceId was "*"; setting
+                                # a real ID produced 70 AccessDenied events
+                                # across instance-scanner and access-tracker
+                                # while the state machine still reported
+                                # SUCCEEDED, because the discovery code treats a
+                                # failed region as a region with nothing in it.
+                                # It has its own statement below.
                                 "sso:ListApplications",
                                 "sso:DescribeApplication",
                                 "sso:DescribeApplicationProvider",
@@ -876,10 +1053,20 @@ class IamIdentityCenterDiscoveryStack(Stack):
                                 "sso:DescribeInstance"
                             ],
                             resources=[
-                                "arn:aws:sso:::instance/*",
-                                "arn:aws:sso::*:application/*/*",
+                                self.instance_arn_scope.value_as_string,
+                                f"arn:aws:sso::*:application/{self.instance_id_scope}/*",
                                 "arn:aws:sso::aws:applicationProvider/*"
                             ]
+                        ),
+                        # sso:ListInstances, on the only resource that can match
+                        # it. Enumerating instances is the entry point of
+                        # discovery, so this cannot be tightened further -- but it
+                        # is a List of instance metadata and destroys nothing.
+                        iam.PolicyStatement(
+                            sid="SSOListInstancesRequiresWildcard",
+                            effect=iam.Effect.ALLOW,
+                            actions=["sso:ListInstances"],
+                            resources=["arn:aws:sso:::instance/*"]
                         ),
                         # Permission-set reads, used to resolve permission set
                         # names for account assignments.
@@ -903,8 +1090,8 @@ class IamIdentityCenterDiscoveryStack(Stack):
                                 "sso:ListPermissionSets"
                             ],
                             resources=[
-                                "arn:aws:sso:::instance/*",
-                                "arn:aws:sso:::permissionSet/*/*"
+                                self.instance_arn_scope.value_as_string,
+                                f"arn:aws:sso:::permissionSet/{self.instance_id_scope}/*"
                             ]
                         ),
                         # DescribeApplicationAssignment is scoped to the
@@ -917,7 +1104,7 @@ class IamIdentityCenterDiscoveryStack(Stack):
                                 "sso:DescribeApplicationAssignment"
                             ],
                             resources=[
-                                "arn:aws:sso::*:application/*/*"
+                                f"arn:aws:sso::*:application/{self.instance_id_scope}/*"
                             ]
                         ),
                         iam.PolicyStatement(
@@ -959,9 +1146,17 @@ class IamIdentityCenterDiscoveryStack(Stack):
                             resources=[
                                 f"arn:aws:iam::*:role/iam-identity-center-cross-account-discovery-role"
                             ],
+                            # Identity-side counterpart to the sts:ExternalId
+                            # condition on each member-account role's trust policy.
+                            # Both sides must carry the same value, so both read the
+                            # CrossAccountExternalId parameter -- pinning a literal
+                            # here silently breaks every cross-account call the
+                            # moment the parameter is set to anything else, and the
+                            # failure surfaces only as AccessDenied inside a Lambda
+                            # whose state machine still reports SUCCEEDED.
                             conditions={
                                 "StringEquals": {
-                                    "sts:ExternalId": "iam-identity-center-discovery"
+                                    "sts:ExternalId": self.cross_account_external_id.value_as_string
                                 }
                             }
                         )
@@ -1378,8 +1573,21 @@ class IamIdentityCenterDiscoveryStack(Stack):
                     user=True
                 )
             ),
-            # Disable execute API endpoint for additional security
-            disable_execute_api_endpoint=False,  # Set to True in production with custom domain
+            # Whether the default execute-api.amazonaws.com endpoint stays reachable.
+            #
+            # It has to default to enabled, because it is the only endpoint this
+            # stack creates: there is no custom domain here, so disabling it by
+            # default would deploy an export API that nothing can call, and the
+            # README's own examples would fail. Access is already gated by IAM
+            # authentication and the IP-range resource policy below, so the endpoint
+            # is reachable rather than open.
+            #
+            # It is a flag rather than a hardcoded False so that attaching a custom
+            # domain does not require editing the stack: deploy with
+            # `-c disableExecuteApiEndpoint=true` once one exists, which is the point
+            # at which leaving the default endpoint live adds surface without adding
+            # a way in.
+            disable_execute_api_endpoint=self.disable_execute_api_endpoint,
             min_compression_size=cdk.Size.kibibytes(1),  # 1 KiB = 1024 bytes
             binary_media_types=["application/octet-stream"],
             # Add resource policy to restrict by IP address
@@ -1694,6 +1902,22 @@ class IamIdentityCenterDiscoveryStack(Stack):
                                 f"{self.api.arn_for_execute_api()}/prod/GET/export/*",
                                 f"{self.api.arn_for_execute_api()}/prod/POST/trigger"
                             ],
+                            # A DateGreaterThan condition on aws:CurrentTime of
+                            # 2024-01-01T00:00:00Z used to sit here. Any date in
+                            # the past makes the condition unconditionally true,
+                            # so it restricted nothing while reading as a
+                            # temporal guard -- the same defect as the
+                            # aws:PrincipalOrgID condition removed from the
+                            # reactive-monitoring role, and a pattern a reader
+                            # might copy believing it does something. Removed
+                            # rather than refreshed: there is no expiry this
+                            # role is meant to have.
+                            #
+                            # The IP condition below is the real restriction, and
+                            # these are RFC 1918 ranges: this role is reachable
+                            # only from private address space, so it is usable
+                            # from inside a VPC or over VPN, not from the
+                            # internet. Change the ranges to match your network.
                             conditions={
                                 "IpAddress": {
                                     "aws:SourceIp": [
@@ -1701,9 +1925,6 @@ class IamIdentityCenterDiscoveryStack(Stack):
                                         "172.16.0.0/12",
                                         "192.168.0.0/16"
                                     ]
-                                },
-                                "DateGreaterThan": {
-                                    "aws:CurrentTime": "2024-01-01T00:00:00Z"
                                 }
                             }
                         )
@@ -1794,13 +2015,30 @@ class IamIdentityCenterDiscoveryStack(Stack):
             enabled=True
         )
         
-        # Add Step Functions as target with enhanced input
+        # Add Step Functions as target with enhanced input.
+        #
+        # force_full_discovery is True so the scheduled run takes the full path.
+        # With it False, CheckDiscoveryType routed to CheckIncrementalEligibility
+        # and the run took the incremental branch, which is
+        # InitializeIncrementalDiscovery -> IncrementalInstanceScanner ->
+        # ProcessIncrementalResults -> EnrichIncrementalWithLastAccessed. That
+        # branch never reaches ApplicationDiscovery or AssignmentDiscovery, and
+        # instance-scanner discovers instances only -- so the daily run refreshed
+        # instances and last-accessed data while applications and assignments
+        # went stale until someone triggered a full run by hand. Confirmed on a
+        # real scheduled execution, which visited only those states.
+        #
+        # The incremental branch is still reachable deliberately (pass
+        # force_full_discovery false), but it does not narrow anything: nothing
+        # reads the incremental plan, so "incremental" currently means "scan
+        # fewer resource types", not "scan the changed subset". Making it
+        # genuinely incremental is a behavioural change, not this fix.
         scheduled_target_input = events.RuleTargetInput.from_object({
             "discovery_run_id": events.EventField.from_path("$.id"),
             "timestamp": events.EventField.from_path("$.time"),
             "trigger": "scheduled",
             "schedule_type": "daily",
-            "force_full_discovery": False,
+            "force_full_discovery": True,
             "incremental_discovery_enabled": True,
             "security_context": {
                 "source": "eventbridge",

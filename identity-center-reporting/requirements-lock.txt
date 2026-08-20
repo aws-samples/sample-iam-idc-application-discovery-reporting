@@ -1,11 +1,11 @@
-# Exact versions this solution was validated with: the 179-test suite, cdk synth
-# with the AwsSolutionsChecks rule pack, and a live deploy + smoke test in
-# us-east-1. Generated with `pip freeze` from that environment.
+# Full transitive dependency graph at the exact versions this solution was
+# validated with: the 180-test suite, cdk synth with the AwsSolutionsChecks rule
+# pack, and a live deploy plus smoke test in us-east-1. Generated with pip freeze.
 #
-# requirements.txt carries ranges with major-version caps, which is what you want
-# for ongoing use -- it picks up patch and minor security fixes. Use this file
-# instead when you need a byte-identical environment (reproducing a bug, pinning
-# CI, or auditing exactly what was tested):
+# requirements.txt now pins the DIRECT dependencies exactly too, so the two files
+# no longer differ in strictness -- they differ in depth. This one additionally
+# pins everything those dependencies pull in, which requirements.txt cannot
+# express. Install from here when you need a byte-identical environment:
 #
 #     pip install -r requirements-lock.txt
 #

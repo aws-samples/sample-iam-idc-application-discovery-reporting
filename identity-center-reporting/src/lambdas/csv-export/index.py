@@ -676,8 +676,15 @@ def query_instances(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             filter_expressions.append('last_updated <= :date_to')
             expression_values[':date_to'] = filters['date_to']
         
-        if filter_expressions:
-            scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        # A retired row is one discovery no longer finds and whose deletion has
+        # already been reported. It is kept for the audit trail, so it must be
+        # excluded here -- otherwise an export lists deleted applications and
+        # revoked assignments as live access, which is the opposite of what a
+        # least-privilege review needs.
+        filter_expressions.append('attribute_not_exists(retired_at)')
+
+        scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        if expression_values:
             scan_params['ExpressionAttributeValues'] = expression_values
         
         # Execute scan
@@ -736,8 +743,15 @@ def query_applications(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             filter_expressions.append('last_updated <= :date_to')
             expression_values[':date_to'] = filters['date_to']
         
-        if filter_expressions:
-            scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        # A retired row is one discovery no longer finds and whose deletion has
+        # already been reported. It is kept for the audit trail, so it must be
+        # excluded here -- otherwise an export lists deleted applications and
+        # revoked assignments as live access, which is the opposite of what a
+        # least-privilege review needs.
+        filter_expressions.append('attribute_not_exists(retired_at)')
+
+        scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        if expression_values:
             scan_params['ExpressionAttributeValues'] = expression_values
         
         # Execute scan
@@ -791,8 +805,15 @@ def query_assignments(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             filter_expressions.append('last_updated <= :date_to')
             expression_values[':date_to'] = filters['date_to']
         
-        if filter_expressions:
-            scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        # A retired row is one discovery no longer finds and whose deletion has
+        # already been reported. It is kept for the audit trail, so it must be
+        # excluded here -- otherwise an export lists deleted applications and
+        # revoked assignments as live access, which is the opposite of what a
+        # least-privilege review needs.
+        filter_expressions.append('attribute_not_exists(retired_at)')
+
+        scan_params['FilterExpression'] = ' AND '.join(filter_expressions)
+        if expression_values:
             scan_params['ExpressionAttributeValues'] = expression_values
         
         # Execute scan

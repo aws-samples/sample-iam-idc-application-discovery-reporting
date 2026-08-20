@@ -8,6 +8,7 @@ run of whole tokens within the other side's tokens.
 """
 
 import logging
+from shared.utils import redact_principal
 import re
 import boto3
 from typing import List, Optional
@@ -249,12 +250,14 @@ def evaluate_group_application_match(
             })
         
         # Log the error with context
+        # principal_name is a resolved Identity Store display name, which in a
+        # directory federated from an email-based source is an email address.
+        # Redact it. application_name stays: it is a resource name the operator
+        # chose, and the failure is not diagnosable without it.
         logger.error(
-            f"Matching evaluation failed: "
-            f"principal_type='{principal_type}', "
-            f"principal_name='{principal_name}', "
-            f"application_name='{application_name}', "
-            f"error='{str(e)}'"
+            "Matching evaluation failed: principal_type=%s, principal_name=%s, "
+            "application_name=%s, error=%s",
+            principal_type, redact_principal(principal_name), application_name, str(e)
         )
         
         _emit_matching_metrics(result, error_occurred)

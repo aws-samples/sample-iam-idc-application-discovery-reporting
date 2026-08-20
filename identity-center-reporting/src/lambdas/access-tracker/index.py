@@ -1,5 +1,17 @@
 # Access Tracker Lambda Function
 # Enriches assignment data with last-accessed timestamps from CloudTrail
+#
+# PERSONAL DATA: this function reads UserName from the Identity Store (typically
+# an email address or login identifier) and writes per-person last-accessed
+# history to DynamoDB. That combination -- who holds access to what, and when
+# they last used it -- is personal data under the GDPR and comparable regimes,
+# and it is a behavioural record, not just an identifier.
+#
+# Under the AWS shared responsibility model the deploying account owns lawful
+# basis, retention, data residency, access control, and erasure for it. Note that
+# DynamoDB point-in-time recovery is enabled by default here, which extends the
+# window in which this data remains recoverable after deletion. See "Data
+# protection and your compliance obligations" in the repository README.
 
 import json
 import boto3
@@ -12,7 +24,7 @@ from datetime import datetime, timezone, timedelta
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from shared.utils import setup_logging, handle_api_error, safe_api_call
+from shared.utils import setup_logging, handle_api_error, safe_api_call, redact_principal, get_cross_account_external_id, redact_assignment_id
 from shared.tracing import init_xray_tracing, trace_lambda_handler
 
 # Initialize X-Ray tracing
@@ -225,7 +237,7 @@ def get_cross_account_identitystore_client(account_id: str, region: Optional[str
         response = sts.assume_role(
             RoleArn=role_arn,
             RoleSessionName='access-tracker-cross-account',
-            ExternalId='iam-identity-center-discovery'
+            ExternalId=get_cross_account_external_id()
         )
 
         credentials = response['Credentials']
@@ -310,7 +322,7 @@ def get_group_memberships_for_identity_store(
                     if not next_token:
                         break
                 except Exception as e:
-                    logger.warning(f"Error getting memberships for group {group_id}: {e}")
+                    logger.warning("Error getting memberships for group %s: %s", redact_principal(group_id), e)
                     break
             
             if members:
@@ -426,7 +438,7 @@ def get_user_name(
         return username
         
     except Exception as e:
-        logger.warning(f"Error looking up user {user_id}: {e}")
+        logger.warning("Error looking up user %s: %s", redact_principal(user_id), e)
         user_cache[cache_key] = None
         return None
 
@@ -614,7 +626,7 @@ def enrich_assignments_with_last_accessed(
                 })
                     
             except Exception as e:
-                error_msg = f"Error processing assignment {assignment.get('assignment_id', 'unknown')}: {str(e)}"
+                error_msg = f"Error processing assignment {redact_assignment_id(assignment.get('assignment_id'))}: {str(e)}"
                 logger.warning(error_msg)
                 result['errors'].append(error_msg)
         
@@ -746,7 +758,7 @@ def get_cross_account_cloudtrail_client(account_id: str) -> Optional[Any]:
         response = sts.assume_role(
             RoleArn=role_arn,
             RoleSessionName='access-tracker-cloudtrail',
-            ExternalId='iam-identity-center-discovery'
+            ExternalId=get_cross_account_external_id()
         )
 
         credentials = response['Credentials']
@@ -1011,7 +1023,7 @@ def batch_update_assignments(updates: List[Dict[str, Any]]) -> Dict[str, Any]:
             result['updated_count'] += 1
             
         except Exception as e:
-            error_msg = f"Failed to update assignment {update.get('assignment_id', 'unknown')}: {str(e)}"
+            error_msg = f"Failed to update assignment {redact_assignment_id(update.get('assignment_id'))}: {str(e)}"
             logger.warning(error_msg)
             result['errors'].append(error_msg)
     

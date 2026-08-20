@@ -1,10 +1,31 @@
 """
 Tests for delegated admin account functionality
 """
+import importlib.util
+import os
+import re
 import pytest
+from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import boto3
 from botocore.exceptions import ClientError
+
+
+def _load_shared_utils():
+    """
+    Load src/lambdas/shared/utils.py directly, by path.
+
+    Other tests in this suite install a Mock into sys.modules['shared.utils'] to
+    isolate handler imports. A plain `import shared.utils` here would pick up that
+    Mock depending on test order, and every assertion about the real ExternalId
+    behaviour would then pass against a Mock instead of the code. Loading from the
+    file bypasses sys.modules entirely.
+    """
+    path = Path(__file__).resolve().parents[1] / 'src' / 'lambdas' / 'shared' / 'utils.py'
+    spec = importlib.util.spec_from_file_location('_real_shared_utils', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class TestDelegatedAdminAccountLogic:
@@ -52,14 +73,62 @@ class TestDelegatedAdminAccountLogic:
         
         assert expected_arn == f"arn:aws:iam::{delegated_admin}:role/{role_name}"
     
-    @patch('boto3.client')
-    def test_role_assumption_uses_external_id(self, mock_boto_client):
-        """Test that external ID is used for role assumption"""
-        external_id = "iam-identity-center-discovery"
-        
-        # Verify external ID is set correctly
-        assert external_id == "iam-identity-center-discovery"
-    
+    def test_external_id_comes_from_environment(self):
+        """The ExternalId is read from the stack-set env var, not a literal."""
+        utils = _load_shared_utils()
+        with patch.dict(os.environ, {'CROSS_ACCOUNT_EXTERNAL_ID': 'a-unique-value-1234'}, clear=False):
+            assert utils.get_cross_account_external_id() == 'a-unique-value-1234'
+
+    def test_external_id_missing_raises_rather_than_defaulting(self):
+        """
+        An unset ExternalId must fail loudly.
+
+        The previous version of this test asserted a local literal against itself,
+        so it passed no matter what the code did -- including while the deployed
+        value was still the published string this repository ships.
+        """
+        utils = _load_shared_utils()
+        env = {k: v for k, v in os.environ.items() if k != 'CROSS_ACCOUNT_EXTERNAL_ID'}
+        with patch.dict(os.environ, env, clear=True), \
+             pytest.raises(ValueError, match='CROSS_ACCOUNT_EXTERNAL_ID'):
+            utils.get_cross_account_external_id()
+
+    def test_published_external_id_is_not_hardcoded_anywhere(self):
+        """
+        No runtime code may pin the ExternalId to the value this repo published.
+
+        This is the assertion that would have caught the real defect: the trust
+        policies, the env var and one Lambda helper were moved to a generated value
+        while the execution-role policy condition and four other call sites still
+        carried the literal, so every cross-account assume was denied while the
+        state machine still reported SUCCEEDED.
+        """
+        root = Path(__file__).resolve().parents[1]
+
+        # Require the literal to be the assigned *value*, not merely present on a
+        # line that also says "ExternalId". Prose legitimately names the forbidden
+        # value -- the CfnRule that rejects it has to quote it to explain itself --
+        # and a bare substring check flags that guard as a violation of itself.
+        # EXTERNAL_?ID covers all three spellings the codebase used: the boto3
+        # kwarg (ExternalId=), the IAM condition key ("sts:ExternalId":) and the
+        # module constant (EXTERNAL_ID =). Matching only "ExternalId" lets the
+        # underscored constant form through, which is one of the forms that
+        # actually shipped.
+        pinned = re.compile(
+            r"""EXTERNAL_?ID["']?\s*[:=]\s*["']iam-identity-center-discovery["']""",
+            re.IGNORECASE,
+        )
+
+        offenders = []
+        for path in list((root / 'src').rglob('*.py')) + list((root / 'lib').rglob('*.py')):
+            for num, line in enumerate(path.read_text().splitlines(), 1):
+                if pinned.search(line):
+                    offenders.append(f"{path.relative_to(root)}:{num}: {line.strip()}")
+        assert not offenders, (
+            "ExternalId pinned to the published literal:\n" + "\n".join(offenders)
+        )
+
+
     def test_role_session_name_format(self):
         """Test that role session name follows correct format"""
         session_name = "IAMIdentityCenterDiscovery-DelegatedAdmin"

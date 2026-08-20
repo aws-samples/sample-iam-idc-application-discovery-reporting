@@ -165,30 +165,85 @@ describe('IdentityCenterAppMonitorStack', () => {
       template = Template.fromStack(stack);
     });
 
-    test('Lambda role has Identity Center API permissions', () => {
+    test('assignment read and delete are scoped to the monitored instance', () => {
+      // The delete action revokes a person's access, so it must never be granted
+      // on '*'. The resource is built at deploy time from the
+      // IdentityCenterInstanceArn parameter, so assert the Fn::Join shape rather
+      // than a literal ARN.
       template.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
+              Sid: 'ScopedToMonitoredInstanceApplications',
               Effect: 'Allow',
-              Action: [
-                'sso:DescribeApplication',
-                'sso:DescribeApplicationAssignment',
-                'sso:DeleteApplicationAssignment',
-                'sso:ListApplications',
-                'sso:DescribeInstance',
-                'sso:ListInstances',
-              ],
-              Resource: '*',
-              Condition: {
-                StringEquals: {
-                  'aws:PrincipalOrgID': Match.anyValue(),
-                },
+              Action: Match.arrayWith(['sso:DeleteApplicationAssignment']),
+              Resource: {
+                'Fn::Join': ['', Match.arrayWith([
+                  'arn:aws:sso::',
+                  { Ref: 'ManagementAccountId' },
+                  ':application/',
+                  { 'Fn::Select': [1, { 'Fn::Split': ['instance/', { Ref: 'IdentityCenterInstanceArn' }] }] },
+                  '/*',
+                ])],
               },
             }),
           ]),
         },
       });
+    });
+
+    test('instance reads are scoped to the instance ARN parameter', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Sid: 'ScopedToMonitoredInstance',
+              Effect: 'Allow',
+              Action: Match.arrayWith(['sso:ListApplications', 'sso:DescribeInstance']),
+              Resource: { Ref: 'IdentityCenterInstanceArn' },
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('only sso:ListInstances is granted on a wildcard resource', () => {
+      // ListInstances has no resource type in the Service Authorization
+      // Reference, so '*' is the only expressible grant. Anything else appearing
+      // on '*' is a regression -- particularly DeleteApplicationAssignment, which
+      // was granted that way until it was verified scopeable against a live
+      // instance.
+      const policies = template.findResources('AWS::IAM::Policy');
+      for (const policy of Object.values(policies)) {
+        for (const statement of (policy as any).Properties.PolicyDocument.Statement) {
+          if (statement.Resource !== '*') continue;
+          const actions: string[] = Array.isArray(statement.Action)
+            ? statement.Action : [statement.Action];
+          for (const action of actions) {
+            if (typeof action === 'string' && action.startsWith('sso:')) {
+              expect(action).toBe('sso:ListInstances');
+            }
+          }
+        }
+      }
+    });
+
+    test('Identity Center statement carries no self-referential org condition', () => {
+      // The statement used to carry
+      //   Condition: { StringEquals: { 'aws:PrincipalOrgID': '${aws:PrincipalOrgID}' } }
+      // and the assertion above accepted it with Match.anyValue(), so the test
+      // proved a condition was present without ever proving it did anything. It
+      // did not: comparing a key to itself is tautological, and the deployed
+      // function's successful sso:DescribeApplication calls confirmed it always
+      // evaluated true. Assert on the value, not merely the shape.
+      const policies = template.findResources('AWS::IAM::Policy');
+      for (const policy of Object.values(policies)) {
+        const statements = (policy as any).Properties.PolicyDocument.Statement;
+        for (const statement of statements) {
+          const value = statement?.Condition?.StringEquals?.['aws:PrincipalOrgID'];
+          expect(value).not.toBe('${aws:PrincipalOrgID}');
+        }
+      }
     });
 
     test('Lambda role has Identity Store API permissions', () => {

@@ -190,25 +190,72 @@ export class IdentityCenterAppMonitorStack extends cdk.Stack {
       ],
     });
 
-    // Add Identity Center API permissions with organization condition
+    // Identity Center API permissions, scoped to the instance being monitored.
+    //
+    // The instance ID is derived from the IdentityCenterInstanceArn parameter
+    // rather than taken as a second parameter, so there is one source of truth
+    // and no way for an instance ID and an instance ARN to disagree. The ARN
+    // parameter's allowedPattern already guarantees the
+    // arn:aws:sso:::instance/ssoins-... shape, so splitting on 'instance/' is
+    // safe. Fn::Split resolves at deploy time, which is what lets a
+    // CloudFormation parameter reach into a policy resource ARN at all.
+    //
+    // Each scope below was verified against a live instance with a throwaway role
+    // and a negative control -- the same policy pointed at a bogus instance or
+    // application ID returns AccessDenied for every action, so these are real
+    // restrictions and not a policy being silently ignored. That check matters
+    // here: IAM Access Analyzer accepts scoping sso:ListInstances to an ARN even
+    // though it cannot be scoped, so validate-policy alone proves nothing for
+    // this service.
+    //
+    // Also gone from this statement:
+    //   conditions: { StringEquals: { 'aws:PrincipalOrgID': '${aws:PrincipalOrgID}' } }
+    // which a comment described as an "organization condition". It compared the
+    // key to itself, so it was tautological -- the deployed function's successful
+    // sso:DescribeApplication calls proved it always evaluated true. It is also
+    // the wrong key for an identity policy on a role in a single account, where
+    // the caller's organization is always this organization.
+    const monitoredInstanceId = cdk.Fn.select(
+      1, cdk.Fn.split('instance/', this.identityCenterInstanceArnParameter.valueAsString)
+    );
+    const monitoredApplications = `arn:aws:sso::${managementAccountIdParameter.valueAsString}:application/${monitoredInstanceId}/*`;
+
+    // Application-scoped: everything that reads or destroys an assignment.
+    // DeleteApplicationAssignment is the action worth scoping -- it revokes a
+    // person's access -- and it is confirmed to work against an application ARN.
     lambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScopedToMonitoredInstanceApplications',
       effect: iam.Effect.ALLOW,
       actions: [
         'sso:DescribeApplication',
         'sso:DescribeApplicationAssignment',
         'sso:DeleteApplicationAssignment',
-        'sso:ListApplications',
-        // Resolve the Identity Store ID from the instance ARN. Assignment
-        // CloudTrail events omit directoryId, so the handler looks it up here.
-        'sso:DescribeInstance',
-        'sso:ListInstances',
       ],
+      resources: [monitoredApplications],
+    }));
+
+    // Instance-scoped. sso:ListApplications does support resource-level scoping
+    // to the instance ARN, verified in both directions, despite guidance to the
+    // contrary. DescribeInstance resolves the Identity Store ID, which assignment
+    // CloudTrail events omit.
+    lambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ScopedToMonitoredInstance',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'sso:ListApplications',
+        'sso:DescribeInstance',
+      ],
+      resources: [this.identityCenterInstanceArnParameter.valueAsString],
+    }));
+
+    // sso:ListInstances has no resource type in the Service Authorization
+    // Reference, so '*' is the only expressible grant. It returns instance
+    // metadata for the account and destroys nothing.
+    lambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ListInstancesRequiresWildcard',
+      effect: iam.Effect.ALLOW,
+      actions: ['sso:ListInstances'],
       resources: ['*'],
-      conditions: {
-        StringEquals: {
-          'aws:PrincipalOrgID': '${aws:PrincipalOrgID}',
-        },
-      },
     }));
 
     // Add Identity Store API permissions

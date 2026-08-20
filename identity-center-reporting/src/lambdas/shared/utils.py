@@ -2,6 +2,7 @@
 
 import logging
 import json
+import os
 import boto3
 import time
 import random
@@ -132,6 +133,44 @@ def handle_access_denied_exception(error: Exception, context: Any, resource_arn:
         })
     }
 
+def get_cross_account_external_id() -> str:
+    """
+    Return the ExternalId the Lambdas must present when assuming a member-account
+    discovery role.
+
+    The value comes from the CROSS_ACCOUNT_EXTERNAL_ID environment variable, set by
+    the CrossAccountExternalId stack parameter, and must match three other places:
+    the sts:ExternalId condition on the member-account role's trust policy, the same
+    condition on this function's own execution-role policy, and the value passed to
+    scripts/deploy-cross-account-roles.py.
+
+    It was previously the literal 'iam-identity-center-discovery', repeated at five
+    call sites. An ExternalId published in a sample provides no confused-deputy
+    protection at all: the condition only works while the value is unknown to the
+    party being guarded against, and this one was in the repository.
+
+    There is deliberately no fallback default. A missing value must fail loudly at
+    the first cross-account call rather than silently reintroduce a public shared
+    secret, and a single accessor means a future call site cannot reintroduce the
+    literal by copying its neighbour.
+
+    Returns:
+        The configured ExternalId.
+
+    Raises:
+        ValueError: when CROSS_ACCOUNT_EXTERNAL_ID is unset or empty.
+    """
+    external_id = os.environ.get('CROSS_ACCOUNT_EXTERNAL_ID')
+    if not external_id:
+        raise ValueError(
+            "CROSS_ACCOUNT_EXTERNAL_ID is not set, so this function cannot assume "
+            "the cross-account discovery role. Deploy the stack with "
+            "--parameters CrossAccountExternalId=<your-value>, and give the same "
+            "value to scripts/deploy-cross-account-roles.py."
+        )
+    return external_id
+
+
 def get_aws_client(service_name: str, region: Optional[str] = None, role_arn: Optional[str] = None) -> boto3.client:
     """
     Create AWS service client with optional cross-account role assumption
@@ -145,13 +184,13 @@ def get_aws_client(service_name: str, region: Optional[str] = None, role_arn: Op
         Configured boto3 client
     """
     session = boto3.Session()
-    
+
     if role_arn:
         sts_client = session.client('sts')
         assumed_role = sts_client.assume_role(
             RoleArn=role_arn,
             RoleSessionName='iam-identity-center-discovery',
-            ExternalId='iam-identity-center-discovery'  # Required by cross-account role
+            ExternalId=get_cross_account_external_id()
         )
         
         credentials = assumed_role['Credentials']
@@ -191,6 +230,31 @@ def redact_principal(value: Optional[str], keep: int = 8) -> str:
     if len(text) <= keep:
         return text
     return f"{text[:keep]}..."
+
+
+def redact_assignment_id(assignment_id: Optional[str]) -> str:
+    """
+    Shorten an assignment key for logging, dropping the principal half.
+
+    assignment_id is "<application-id>#<principal-id>", so logging it whole emits
+    the same Identity Store UUID that redact_principal exists to keep out of the
+    logs -- a composite key is as sensitive as the most sensitive thing it
+    concatenates. The application half is what makes a log line locatable, so it is
+    kept and the principal half is replaced.
+
+    Args:
+        assignment_id: Composite assignment key. May be None.
+
+    Returns:
+        The application portion with the principal portion redacted.
+    """
+    if not assignment_id:
+        return "unknown"
+    text = str(assignment_id)
+    if '#' not in text:
+        return redact_principal(text)
+    application_part, _, principal_part = text.partition('#')
+    return f"{application_part}#{redact_principal(principal_part, keep=4)}"
 
 
 def scan_all(table, **kwargs) -> list:

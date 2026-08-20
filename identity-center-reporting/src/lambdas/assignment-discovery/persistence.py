@@ -5,7 +5,7 @@ import boto3
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 from shared.models import Assignment, DiscoveryResult, ValidationError
-from shared.utils import query_all
+from shared.utils import query_all, redact_assignment_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ def persist_assignments_with_change_detection(
                     new_assignments.append(assignment)
                     
             except Exception as e:
-                error_msg = f"Error checking assignment {assignment.assignment_id}: {str(e)}"
+                error_msg = f"Error checking assignment {redact_assignment_id(assignment.assignment_id)}: {str(e)}"
                 logger.warning(error_msg)
                 result.add_error(error_msg)
                 continue
@@ -118,7 +118,7 @@ def get_existing_assignment(table: boto3.resource, assignment_id: str) -> Option
         return response.get('Item')
         
     except Exception as e:
-        logger.debug(f"Error checking existing assignment {assignment_id}: {str(e)}")
+        logger.debug(f"Error checking existing assignment {redact_assignment_id(assignment_id)}: {str(e)}")
         return None
 
 def should_update_assignment(existing_item: Dict[str, Any], new_assignment: Assignment) -> bool:
@@ -150,7 +150,15 @@ def should_update_assignment(existing_item: Dict[str, Any], new_assignment: Assi
             new_value = new_item.get(field)
             
             if existing_value != new_value:
-                logger.debug(f"Change detected in assignment {new_assignment.assignment_id} field '{field}': {existing_value} -> {new_value}")
+                # Log which field changed, never the values. This loop compares
+                # every field including principal_name, so interpolating the
+                # before/after values put resolved Identity Store display names --
+                # email addresses, for a directory federated from an email-based
+                # source -- into CloudWatch at debug level.
+                logger.debug(
+                    "Change detected in assignment %s field '%s'",
+                    redact_assignment_id(new_assignment.assignment_id), field
+                )
                 return True
         
         # Check if principal was previously deleted but now exists
@@ -158,7 +166,15 @@ def should_update_assignment(existing_item: Dict[str, Any], new_assignment: Assi
         new_name = new_item.get('principal_name', '')
         
         if '[DELETED' in existing_name and '[DELETED' not in new_name:
-            logger.info(f"Principal restored for assignment {new_assignment.assignment_id}: {existing_name} -> {new_name}")
+            # The fact worth recording is that a principal came back, not who it
+            # is -- and the assignment ID is not the neutral record locator it looks
+            # like: it is "<application-id>#<principal-id>", so emitting it whole
+            # here would restate the very UUID principal_name is redacted for, at
+            # info level, where retention is longest.
+            logger.info(
+                "Principal restored for assignment %s (previously marked deleted)",
+                redact_assignment_id(new_assignment.assignment_id)
+            )
             return True
         
         return False
@@ -202,16 +218,16 @@ def persist_assignment_batch_with_validation(
                     batch.put_item(Item=item)
                     result.add_data(assignment)
                     
-                    logger.debug(f"Queued {operation_type} assignment for batch write: {assignment.assignment_id}")
+                    logger.debug(f"Queued {operation_type} assignment for batch write: {redact_assignment_id(assignment.assignment_id)}")
                     
                 except ValidationError as e:
-                    error_msg = f"Validation failed for assignment {assignment.assignment_id}: {str(e)}"
+                    error_msg = f"Validation failed for assignment {redact_assignment_id(assignment.assignment_id)}: {str(e)}"
                     logger.warning(error_msg)
                     result.add_error(error_msg)
                     continue
                     
                 except Exception as e:
-                    error_msg = f"Error preparing assignment {assignment.assignment_id} for write: {str(e)}"
+                    error_msg = f"Error preparing assignment {redact_assignment_id(assignment.assignment_id)} for write: {str(e)}"
                     logger.warning(error_msg)
                     result.add_error(error_msg)
                     continue
@@ -381,10 +397,10 @@ def delete_assignment_batch(table: boto3.resource, assignments_to_delete: List[D
                         Key={'assignment_id': assignment['assignment_id']}
                     )
                     result.add_data(assignment)
-                    logger.debug(f"Queued assignment for deletion: {assignment['assignment_id']}")
+                    logger.debug(f"Queued assignment for deletion: {redact_assignment_id(assignment['assignment_id'])}")
                     
                 except Exception as e:
-                    error_msg = f"Error deleting assignment {assignment.get('assignment_id', 'unknown')}: {str(e)}"
+                    error_msg = f"Error deleting assignment {redact_assignment_id(assignment.get('assignment_id'))}: {str(e)}"
                     logger.warning(error_msg)
                     result.add_error(error_msg)
                     continue

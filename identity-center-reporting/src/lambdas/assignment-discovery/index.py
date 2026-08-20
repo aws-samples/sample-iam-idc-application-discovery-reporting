@@ -1,5 +1,18 @@
 # Assignment Discovery Lambda Function
 # Discovers user and group assignments for IAM Identity Center applications
+#
+# PERSONAL DATA: this is the collection point. It resolves principal IDs against
+# the Identity Store and persists principal_name, principal_display_name and
+# principal_email to DynamoDB, so the rows written here name individuals and the
+# applications they can reach. Everything downstream -- the CSV exports, the SNS
+# notifications, the change log -- inherits that from this module.
+#
+# Under the AWS shared responsibility model the deploying account owns lawful
+# basis, retention, data residency, access control, and erasure for it, which may
+# engage the GDPR, UK GDPR, or CCPA/CPRA depending on the directory population.
+# Log statements here redact principal identifiers through
+# shared.utils.redact_principal; keep new ones consistent. See "Data protection
+# and your compliance obligations" in the repository README.
 
 import json
 import boto3
@@ -7,7 +20,7 @@ import logging
 import os
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
-from shared.utils import setup_logging, handle_api_error, handle_access_denied_exception, get_aws_client, safe_api_call, redact_principal
+from shared.utils import setup_logging, handle_api_error, handle_access_denied_exception, get_aws_client, safe_api_call, redact_principal, redact_assignment_id
 from shared.models import Assignment, DiscoveryResult, ValidationError, PrincipalType
 from shared.tracing import (
     init_xray_tracing, trace_lambda_handler, trace_discovery_operation,
@@ -187,10 +200,19 @@ def discover_assignments(
                 
                 if assignment:
                     result.add_data(assignment)
-                    logger.debug(f"Successfully processed assignment: {assignment.assignment_id}")
+                    logger.debug(f"Successfully processed assignment: {redact_assignment_id(assignment.assignment_id)}")
                     
             except Exception as e:
-                error_msg = f"Error processing assignment {assignment_data.get('PrincipalId', 'unknown')}: {str(e)}"
+                # Redacted here, at the point the string is built, not at the point
+                # it is logged. This message has two consumers -- logger.warning
+                # below and result.add_error, which carries it into the discovery
+                # result and from there into the run's error report -- so redacting
+                # only at the log call would still publish the raw ID through the
+                # other one.
+                error_msg = (
+                    f"Error processing assignment "
+                    f"{redact_principal(assignment_data.get('PrincipalId', 'unknown'))}: {str(e)}"
+                )
                 logger.warning(error_msg)
                 result.add_error(error_msg)
                 continue
@@ -288,6 +310,13 @@ def list_application_assignments(sso_client: boto3.client, application_arn: str)
     return assignments
 
 class PrincipalLookupFailed(Exception):
+    # The message must carry a redacted principal, never a raw one.
+    #
+    # An exception message is not a private channel: it is logged by the handler
+    # below, and str(exception) is what error reporting puts in its notification
+    # payload. Every raise site here sits directly under a logger call that already
+    # redacts the same value, so interpolating the raw ID one line later undid the
+    # redaction and put the identifier back in CloudWatch.
     """
     Raised when a principal lookup could not be completed.
 
@@ -461,16 +490,16 @@ def get_user_details(identity_store_client: boto3.client, identity_store_id: str
         else:
             # Only a confirmed absence means the user was deleted.
             if error and 'ResourceNotFound' in str(error):
-                logger.warning(f"User {user_id} not found in Identity Store (deleted)")
+                logger.warning("User %s not found in Identity Store (deleted)", redact_principal(user_id))
                 return None
-            logger.error(f"User lookup failed for {user_id}, cannot classify: {error}")
-            raise PrincipalLookupFailed(f"user {user_id}: {error}")
+            logger.error("User lookup failed for %s, cannot classify: %s", redact_principal(user_id), error)
+            raise PrincipalLookupFailed(f"user {redact_principal(user_id)}: {error}")
 
     except PrincipalLookupFailed:
         raise
     except Exception as e:
-        logger.error(f"User lookup failed for {user_id}, cannot classify: {str(e)}")
-        raise PrincipalLookupFailed(f"user {user_id}: {e}")
+        logger.error("User lookup failed for %s, cannot classify: %s", redact_principal(user_id), str(e))
+        raise PrincipalLookupFailed(f"user {redact_principal(user_id)}: {e}")
 
 def get_group_details(identity_store_client: boto3.client, identity_store_id: str, group_id: str) -> Optional[Dict[str, str]]:
     """
@@ -509,16 +538,16 @@ def get_group_details(identity_store_client: boto3.client, identity_store_id: st
         else:
             # Only a confirmed absence means the group was deleted.
             if error and 'ResourceNotFound' in str(error):
-                logger.warning(f"Group {group_id} not found in Identity Store (deleted)")
+                logger.warning("Group %s not found in Identity Store (deleted)", redact_principal(group_id))
                 return None
-            logger.error(f"Group lookup failed for {group_id}, cannot classify: {error}")
-            raise PrincipalLookupFailed(f"group {group_id}: {error}")
+            logger.error("Group lookup failed for %s, cannot classify: %s", redact_principal(group_id), error)
+            raise PrincipalLookupFailed(f"group {redact_principal(group_id)}: {error}")
 
     except PrincipalLookupFailed:
         raise
     except Exception as e:
-        logger.error(f"Group lookup failed for {group_id}, cannot classify: {str(e)}")
-        raise PrincipalLookupFailed(f"group {group_id}: {e}")
+        logger.error("Group lookup failed for %s, cannot classify: %s", redact_principal(group_id), str(e))
+        raise PrincipalLookupFailed(f"group {redact_principal(group_id)}: {e}")
 
 def persist_assignments_to_dynamodb(assignments: List[Assignment]) -> DiscoveryResult:
     """
@@ -601,16 +630,16 @@ def persist_assignment_batch(table: boto3.resource, assignments: List[Assignment
                     batch.put_item(Item=item)
                     result.add_data(assignment)
                     
-                    logger.debug(f"Queued assignment for batch write: {assignment.assignment_id}")
+                    logger.debug(f"Queued assignment for batch write: {redact_assignment_id(assignment.assignment_id)}")
                     
                 except ValidationError as e:
-                    error_msg = f"Validation failed for assignment {assignment.assignment_id}: {str(e)}"
+                    error_msg = f"Validation failed for assignment {redact_assignment_id(assignment.assignment_id)}: {str(e)}"
                     logger.warning(error_msg)
                     result.add_error(error_msg)
                     continue
                     
                 except Exception as e:
-                    error_msg = f"Error preparing assignment {assignment.assignment_id} for write: {str(e)}"
+                    error_msg = f"Error preparing assignment {redact_assignment_id(assignment.assignment_id)} for write: {str(e)}"
                     logger.warning(error_msg)
                     result.add_error(error_msg)
                     continue

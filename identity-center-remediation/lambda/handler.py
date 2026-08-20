@@ -5,6 +5,17 @@ This module orchestrates the event-driven validation and remediation workflow
 for Identity Center application assignments.
 """
 
+# audit-allow: identity-name-is-the-alert
+#
+# This module's structured log entries are the compliance alert. groupName is
+# emitted unredacted on purpose: an alert that will not say which group was
+# assigned to which application cannot be triaged, which is the opposite of the
+# reporting stack's discovery logs, where the same value is redacted because
+# those logs are broad and long-lived.
+#
+# The consequence is that this log group holds personal data. Scope who can read
+# it, and see "Data protection and your compliance obligations" in the README.
+
 import os
 import traceback
 from typing import Dict, Any, Optional

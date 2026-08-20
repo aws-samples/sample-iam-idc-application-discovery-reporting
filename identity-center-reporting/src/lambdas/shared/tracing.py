@@ -90,10 +90,7 @@ def trace_lambda_handler(func: Callable) -> Callable:
         except Exception as e:
             # Add error information to trace
             xray_recorder.put_annotation('error', True)
-            xray_recorder.put_metadata('error_details', {
-                'error_type': type(e).__name__,
-                'error_message': str(e)
-            })
+            xray_recorder.put_metadata('error_details', _traceable_error(e))
             raise
     
     return wrapper
@@ -153,10 +150,7 @@ def trace_discovery_operation(operation_name: str, metadata: Optional[Dict[str, 
                     with xray_recorder.current_subsegment() as subseg:
                         subseg.put_annotation('success', False)
                         subseg.put_annotation('error', True)
-                        subseg.put_metadata('error_details', {
-                            'error_type': type(e).__name__,
-                            'error_message': str(e)
-                        })
+                        subseg.put_metadata('error_details', _traceable_error(e))
                 except (SegmentNotFoundException, AttributeError):
                     pass
                 raise
@@ -238,16 +232,9 @@ def trace_aws_api_call(service_name: str, operation_name: str, metadata: Optiona
                             if http_status:
                                 subseg.put_annotation('http_status_code', http_status)
                             
-                            subseg.put_metadata('aws_error_details', {
-                                'error_code': error_code,
-                                'error_message': e.response.get('Error', {}).get('Message', str(e)),
-                                'request_id': e.response.get('ResponseMetadata', {}).get('RequestId')
-                            })
+                            subseg.put_metadata('aws_error_details', _traceable_error(e))
                         else:
-                            subseg.put_metadata('error_details', {
-                                'error_type': type(e).__name__,
-                                'error_message': str(e)
-                            })
+                            subseg.put_metadata('error_details', _traceable_error(e))
                 except (SegmentNotFoundException, AttributeError):
                     pass
                 raise
@@ -337,6 +324,33 @@ def trace_performance_bottleneck(operation_name: str, threshold_seconds: float =
         
         return wrapper
     return decorator
+
+def _traceable_error(exception: Exception) -> dict:
+    """
+    Describe an exception for X-Ray without carrying its message.
+
+    A trace is a durable, separately-accessible store, and this module wraps the
+    handlers that process Identity Store records. AWS SDK error messages routinely
+    quote the resource they failed on -- "User with id <uuid> not found",
+    "Application ... for principal ..." -- so writing str(exception) into subsegment
+    metadata persists principal identifiers in X-Ray, outside the redaction the log
+    statements around it already apply.
+
+    The type and the AWS error code are what a trace is read for: they say which
+    operation failed and why, and they are bounded values that cannot carry an
+    identifier. The full message stays in CloudWatch, where the handlers log it
+    through their own redaction and where IAM controls who can read it.
+    """
+    details = {'error_type': type(exception).__name__}
+    response = getattr(exception, 'response', None)
+    if isinstance(response, dict):
+        error = response.get('Error', {})
+        details['error_code'] = error.get('Code', 'Unknown')
+        request_id = response.get('ResponseMetadata', {}).get('RequestId')
+        if request_id:
+            details['request_id'] = request_id
+    return details
+
 
 def _sanitize_args_for_tracing(args: tuple, kwargs: dict) -> tuple:
     """

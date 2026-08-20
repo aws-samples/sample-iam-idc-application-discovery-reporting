@@ -11,6 +11,29 @@ import argparse
 import sys
 
 
+
+def redact_assignment_id(assignment_id):
+    """
+    Drop the principal half of an assignment key before printing it.
+
+    assignment_id is "<application-id>#<principal-id>". The application half locates
+    the record; the principal half is an Identity Store UUID naming a real person,
+    and this script prints against the live table.
+
+    Deliberately a local copy of src/lambdas/shared/utils.redact_assignment_id rather
+    than an import: this is a standalone operator script, and reaching into the Lambda
+    package would mean sys.path surgery to save three lines.
+    """
+    if not assignment_id:
+        return 'unknown'
+    text = str(assignment_id)
+    if '#' not in text:
+        return f'{text[:8]}...' if len(text) > 8 else text
+    application_part, _, principal_part = text.partition('#')
+    suffix = f'{principal_part[:4]}...' if len(principal_part) > 4 else principal_part
+    return f'{application_part}#{suffix}'
+
+
 class APITester:
     """Test API Gateway endpoints with IAM authentication"""
     
@@ -197,7 +220,10 @@ response = requests.post(
 )
 
 print(f'Status Code: {response.status_code}')
-print(f'Response: {response.text}')
+# Status only. This endpoint's responses reference the CSV exports, which carry user
+# emails and display names, and this script runs against the live account -- printing
+# the body puts that data in a terminal, a scrollback buffer, and any CI log.
+print(f'Request ID: {response.headers.get("x-amzn-RequestId", "unknown")}')
 
 if response.status_code == 200:
     # Parse response text manually due to malformed JSON from API Gateway
@@ -290,11 +316,23 @@ if response.status_code == 200:
         else:
             print(f'❌ FAIL: Found {assignment_count} assignments (required: > 0)')
         
+        # Principal IDs are deliberately omitted.
+        #
+        # This scans the live assignments table, so every row is a real person's or
+        # group's access. The check here is that assignments exist and are shaped
+        # correctly -- the principal's identity is not needed for that, and printing
+        # it puts real Identity Store identifiers into a terminal, a scrollback
+        # buffer, and whatever CI log captures the run. Principal type is kept
+        # because USER vs GROUP is a property of the assignment, not of the person.
+        #
+        # assignment_id is "<application-id>#<principal-id>", so printing it whole
+        # re-leaks the identifier removed just below. Only the part before the
+        # separator is shown.
         for i, assignment in enumerate(assignments[:5], 1):
+            assignment_id = str(assignment.get('assignment_id', 'N/A'))
             print(f'\n  Assignment {i}:')
-            print(f'    ID: {assignment.get("assignment_id", "N/A")}')
+            print(f'    ID: {redact_assignment_id(assignment_id)}')
             print(f'    Application ARN: {assignment.get("application_arn", "N/A")}')
-            print(f'    Principal ID: {assignment.get("principal_id", "N/A")}')
             print(f'    Principal Type: {assignment.get("principal_type", "N/A")}')
         
         # Summary
@@ -379,7 +417,8 @@ if response.status_code == 200:
                         print(f'   ❌ Failed to download CSV: HTTP {csv_response.status_code}')
                 else:
                     print(f'   ❌ API request failed: HTTP {response.status_code}')
-                    print(f'   Response: {response.text}')
+                    # Status and request ID only -- see the note on the earlier call.
+                    print(f'      Request ID: {response.headers.get("x-amzn-RequestId", "unknown")}')
             
             except requests.exceptions.Timeout:
                 print(f'   ❌ Request timed out after 30 seconds')

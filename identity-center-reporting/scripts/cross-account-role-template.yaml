@@ -7,6 +7,22 @@ Parameters:
     Description: AWS Account ID where the IAM IdC solution is deployed.
     AllowedPattern: '[0-9]{12}'
     ConstraintDescription: Must be a valid 12-digit AWS Account ID
+  CrossAccountExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    MaxLength: 1224
+    AllowedPattern: '^[A-Za-z0-9+=,.@:\/-]{16,}$'
+    ConstraintDescription: >-
+      Must be at least 16 characters. Allowed characters: letters, digits, and
+      + = , . @ : / -
+    Description: >-
+      REQUIRED. Unique ExternalId the solution's Lambdas must present to assume
+      this role. Must match the CrossAccountExternalId given to the reporting
+      stack. There is deliberately no default: this value was previously the
+      literal string "iam-identity-center-discovery", and an ExternalId published
+      in a sample protects nothing -- sts:ExternalId only prevents a third party
+      from having a role act on their behalf while the value is unknown to them.
 
 Resources:
   CrossAccountDiscoveryRole:
@@ -37,54 +53,77 @@ Resources:
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                sts:ExternalId: iam-identity-center-discovery
-      Policies:
-        - PolicyName: IAMIdentityCenterDiscoveryPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # There is no "sso-admin:" IAM prefix. "sso-admin" is the SDK/CLI
-              # client name; every IAM Identity Center action uses the "sso:"
-              # prefix. The Service Authorization Reference declares
-              # "service prefix: sso" and lists sso-admin only in its
-              # "SDK client" column:
-              # https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam-identity-center.html
-              - Sid: IAMIdentityCenterReadAccess
-                Effect: Allow
-                Action:
-                  - sso:ListInstances
-                  - sso:DescribeInstance
-                  - sso:ListApplications
-                  - sso:DescribeApplication
-                  - sso:DescribeApplicationProvider
-                  - sso:ListApplicationAssignments
-                  - sso:DescribeApplicationAssignment
-                Resource: '*'
-              - Sid: SSOPermissionSetReadAccess
-                Effect: Allow
-                Action:
-                  - sso:ListPermissionSets
-                  - sso:DescribePermissionSet
-                Resource: '*'
-              - Sid: IdentityStoreReadAccess
-                Effect: Allow
-                Action:
-                  - identitystore:DescribeUser
-                  - identitystore:DescribeGroup
-                  - identitystore:ListUsers
-                  - identitystore:ListGroups
-                  - identitystore:ListGroupMemberships
-                Resource: '*'
-              - Sid: CloudTrailReadAccess
-                Effect: Allow
-                Action:
-                  - cloudtrail:LookupEvents
-                Resource: '*'
+                sts:ExternalId: !Ref CrossAccountExternalId
       Tags:
         - Key: Purpose
           Value: IAMIdentityCenterDiscovery
         - Key: ManagedBy
           Value: IAMIdentityCenterDiscoveryStack
+
+  # cfn-guard's IAM_NO_INLINE_POLICY_CHECK rejects inline Policies on a role.
+  # The permissions below were an inline block on CrossAccountDiscoveryRole and
+  # are now a standalone managed policy attached to it. Same effective access,
+  # same single consumer -- a managed policy is also independently versioned and
+  # visible in IAM on its own, which makes it easier to review in each member
+  # account than a policy embedded in a role.
+  IAMIdentityCenterDiscoveryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: >-
+              IAM Identity Center (sso), Identity Store, and cloudtrail:LookupEvents
+              do not support resource-level permissions for these read actions, so a
+              wildcard resource is required. Access is read-only and reachable only
+              by assuming the attached role, which is gated by an ExternalId
+              condition.
+    Properties:
+      ManagedPolicyName: iam-identity-center-cross-account-discovery-policy
+      Description: Read-only IAM Identity Center discovery permissions
+      Roles:
+        - !Ref CrossAccountDiscoveryRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # There is no "sso-admin:" IAM prefix. "sso-admin" is the SDK/CLI
+          # client name; every IAM Identity Center action uses the "sso:"
+          # prefix. The Service Authorization Reference declares
+          # "service prefix: sso" and lists sso-admin only in its
+          # "SDK client" column:
+          # https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam-identity-center.html
+          - Sid: IAMIdentityCenterReadAccess
+            Effect: Allow
+            Action:
+              - sso:ListInstances
+              - sso:DescribeInstance
+              - sso:ListApplications
+              - sso:DescribeApplication
+              - sso:DescribeApplicationProvider
+              - sso:ListApplicationAssignments
+              - sso:DescribeApplicationAssignment
+            Resource: '*'
+          - Sid: SSOPermissionSetReadAccess
+            Effect: Allow
+            Action:
+              - sso:ListPermissionSets
+              - sso:DescribePermissionSet
+            Resource: '*'
+          - Sid: IdentityStoreReadAccess
+            Effect: Allow
+            Action:
+              - identitystore:DescribeUser
+              - identitystore:DescribeGroup
+              - identitystore:ListUsers
+              - identitystore:ListGroups
+              - identitystore:ListGroupMemberships
+            Resource: '*'
+          - Sid: CloudTrailReadAccess
+            Effect: Allow
+            Action:
+              - cloudtrail:LookupEvents
+            Resource: '*'
+
 
 Outputs:
   CrossAccountRoleArn:
