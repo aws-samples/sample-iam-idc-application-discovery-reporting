@@ -427,6 +427,17 @@ cd ../identity-center-reporting
 cdk destroy IamIdentityCenterDiscoveryStack-dev
 ```
 
+Expect the teardown to take about 20-25 minutes, most of it the VPC: the NAT
+gateway, interface endpoints and elastic network interfaces are released in sequence.
+Measured at 23 minutes on a fresh account; `cdk deploy` for the same stack took about
+9 minutes. It has not hung.
+
+Three customer-managed KMS keys (S3, DynamoDB, Lambda environment variables) are
+*scheduled* for deletion rather than deleted, and remain listed by
+`aws kms list-keys` in `PendingDeletion` state until their waiting period elapses --
+30 days by default. That is the KMS minimum, not a leftover; there is nothing further
+to delete, and no other resource from the stack survives teardown.
+
 ### Troubleshooting: reporting stack delete fails on the VPC
 
 The reporting stack provisions a VPC (private subnets, NAT gateway, interface
