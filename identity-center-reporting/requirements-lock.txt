@@ -77,5 +77,5 @@ tomlkit==0.15.1
 typeguard==2.13.3
 typing_extensions==4.16.0
 urllib3==2.7.0
-Werkzeug==3.1.8
+Werkzeug==3.1.9
 xmltodict==1.0.4
