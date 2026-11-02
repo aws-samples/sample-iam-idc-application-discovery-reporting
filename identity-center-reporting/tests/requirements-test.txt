@@ -10,7 +10,7 @@ moto==5.2.2
 responses==0.26.2
 
 # Code quality
-pylint==4.0.7
+pylint==4.0.9
 flake8==7.3.0
 black==26.5.1
 
