@@ -60,7 +60,7 @@ pycodestyle==2.14.0
 pycparser==3.0
 pyflakes==3.4.0
 Pygments==2.21.0
-pylint==4.0.7
+pylint==4.0.9
 pytest==9.1.1
 pytest-cov==7.1.0
 pytest-mock==3.15.1
